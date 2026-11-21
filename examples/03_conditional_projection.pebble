@@ -1,0 +1,12 @@
+// 样例 3：if 分段函数投影 + 内置函数 + 列裁剪 + 打印
+// 覆盖：if 表达式、内置函数 round、select、print；可选值比较 null
+Table("scores.parquet") as s
+  .filter(|s| s.score != null)
+  .map(|s| {
+    level = if s.score >= 90 { "A" }
+            else if s.score >= 60 { "B" }
+            else { "C" },
+    rounded = round(s.score)
+  })
+  .select(s.id, level, rounded)
+  .print()

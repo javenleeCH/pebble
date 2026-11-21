@@ -1,0 +1,7 @@
+// 样例 4：列裁剪 + 去重 + 升序 + 回传宿主
+// 覆盖：select、distinct、sort(asc)、collect
+Table("users.parquet") as u
+  .select(u.city)
+  .distinct()
+  .sort(city asc)
+  .collect()

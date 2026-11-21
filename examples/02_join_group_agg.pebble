@@ -1,0 +1,12 @@
+// 样例 2：两表关联 + 分组聚合 + 排序 + 取前 N
+// 覆盖：join、group_by、agg(count/sum)、sort、take、write
+Table("users.parquet") as u
+  .join(Table("orders.parquet") as o, on: u.id == o.uid)
+  .group_by(u.first, u.last)
+  .agg(
+    order_count = count(),
+    total_amount = sum(o.amount)
+  )
+  .sort(total_amount desc)
+  .take(100)
+  .write("top_users.csv")

@@ -1,0 +1,5 @@
+# 预期输出：打印到标准输出
+# 列顺序：category, order_count, min_amount, max_amount, avg_amount
+# 按 category 升序；每个品类一行；avg_amount 为 f64；null 金额不计入聚合
+category,order_count,min_amount,max_amount,avg_amount
+<逐品类聚合结果>

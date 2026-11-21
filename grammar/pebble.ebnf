@@ -1,0 +1,74 @@
+(* Pebble 文法草案（阶段 3，Draft v0.1，原型阶段允许随时改）
+ * 约定：
+ *   =      产生式
+ *   |      候选分支
+ *   []     可选
+ *   {}     重复（零次或多次）
+ *   ()     分组
+ *   "..."  词法终结符
+ * 样例先行：examples/ 下的 .pebble 样例是文法的校验对象。
+ * 优先级与表达式细则见 docs/draft/spec/04-expressions.md（草稿，未定稿）。
+ *)
+
+program        = pipeline , EOF ;
+
+pipeline       = source , { "." , operator } , [ terminal ] ;
+
+source         = ( "Table" | "MemoryTable" ) , "(" , sourceArg , ")" ,
+                 [ "as" , ident ] ;
+sourceArg      = stringLiteral | ident ;
+
+operator       = filter | map | select | distinct | sort | take | join
+               | groupBy | agg ;
+
+filter         = "filter"  , "(" , lambda , ")" ;
+map            = "map"     , "(" , lambda , ")" ;
+select         = "select"  , "(" , expr , { "," , expr } , ")" ;
+distinct       = "distinct", "(" , ")" ;
+sort           = "sort"    , "(" , sortKey , { "," , sortKey } , ")" ;
+sortKey        = expr , [ ( "asc" | "desc" ) ] ;
+take           = "take"     , "(" , intLiteral , ")" ;
+join           = "join"     , "(" , source , "," , "on" , expr , ")" ;
+groupBy        = "group_by", "(" , expr , { "," , expr } , ")" ;
+agg            = "agg"      , "(" , aggBinding , { "," , aggBinding } , ")" ;
+aggBinding     = ident , "=" , aggCall ;
+aggCall        = aggFn , "(" , [ expr ] , ")" ;
+aggFn          = "count" | "sum" | "min" | "max" | "avg" ;
+
+terminal       = "." , ( write | collect | print ) ;
+write          = "write"   , "(" , stringLiteral , ")" ;
+collect        = "collect" , "(" , ")" ;
+print          = "print"   , "(" , ")" ;
+
+lambda         = "|" , ident , "|" , lambdaBody ;
+lambdaBody     = expr | recordLiteral ;
+recordLiteral  = "{" , binding , { "," , binding } , [ "," ] , "}" ;
+binding        = ident , "=" , expr ;
+
+expr           = orExpr ;
+orExpr         = andExpr , { "||" , andExpr } ;
+andExpr        = notExpr , { "&&" , notExpr } ;
+notExpr        = "!" , notExpr | cmpExpr ;
+cmpExpr        = addExpr , [ cmpOp , addExpr ] ;
+cmpOp          = "==" | "!=" | ">" | "<" | ">=" | "<=" ;
+addExpr        = mulExpr , { ( "+" | "-" ) , mulExpr } ;
+mulExpr        = unaryExpr , { ( "*" | "/" | "%" ) , unaryExpr } ;
+unaryExpr      = "-" , unaryExpr | postfixExpr ;
+postfixExpr    = primary , { "." , ident } ;
+primary        = ident | literal | "(" , expr , ")" | ifExpr | call ;
+ifExpr         = "if" , "{" , expr , "}" ,
+                 { "else" , "if" , "{" , expr , "}" } ,
+                 "else" , "{" , expr , "}" ;
+call           = ident , "(" , [ expr , { "," , expr } ] , ")" ;
+
+literal        = intLiteral | floatLiteral | stringLiteral
+               | "true" | "false" | "null" ;
+
+(* ---------- 文法约束（语义层强制，非纯文法可表达） ----------
+ * 1. pipeline 必须以 source 开头；terminal 之后不得再接 operator。
+ * 2. lambda 形参有且仅有一个；lambda 体不得嵌套 lambda。
+ * 3. ifExpr 所有分支类型必须一致；必须存在 else 分支。
+ * 4. agg 只能紧跟在 group_by 之后；aggCall 仅允许出现在 agg 绑定右侧。
+ * 5. join 的右表必须是 source，不得是上游算子结果。
+ * 6. 表达式中不得出现赋值、语句或子流水线。
+ *)

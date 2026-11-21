@@ -1,0 +1,5 @@
+# 预期输出：打印到标准输出
+# 列顺序：id, level, rounded
+# score 为 null 的行被过滤；level 取值 A / B / C；rounded 为 score 四舍五入后的 f64
+id,level,rounded
+<逐行投影结果>

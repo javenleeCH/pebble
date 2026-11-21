@@ -1,0 +1,5 @@
+# 预期输出：写入文件 adult_users.csv
+# 列顺序：full_name, birth_year
+# 行按 birth_year 降序；满足 age >= 18 的行；最多 100 行
+full_name,birth_year
+<按 birth_year 降序的结果行>

@@ -1,0 +1,12 @@
+// 样例 5：分组聚合 min / max / avg
+// 覆盖：group_by、agg(min/max/avg)、sort、print
+Table("orders.parquet") as o
+  .group_by(o.category)
+  .agg(
+    order_count = count(),
+    min_amount = min(o.amount),
+    max_amount = max(o.amount),
+    avg_amount = avg(o.amount)
+  )
+  .sort(category asc)
+  .print()
