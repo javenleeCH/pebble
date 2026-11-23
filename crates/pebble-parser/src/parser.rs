@@ -41,7 +41,7 @@ pub fn parse(source: &str, diags: &mut DiagBag) -> Option<Program> {
     Some(program)
 }
 
-impl<'a> Parser<'a> {
+impl Parser<'_> {
     fn peek(&self) -> &Tok {
         &self.toks[self.pos.min(self.toks.len() - 1)].tok
     }

@@ -87,6 +87,24 @@ rust-version = "1.85"     # 各成员 rust-version.workspace = true 继承
 
 clippy 会读取 `rust-version` 作为 msrv 配置，不再建议你的最低版本写不了的写法。**门禁链是环环相扣的**：MSRV job 守住 `rust-version` 的真实性，`rust-version` 约束 clippy 的建议。
 
+### 翻车实录：本地绿 ≠ CI 绿
+
+第一次跑 CI 就翻车了，而且是同时挂 ubuntu 和 windows 的 Clippy step。原因值得记一辈子：
+
+- **本地开发用 stable（1.100）的 clippy，干净通过**；
+- CI pin 在 **1.85.0** 的 clippy，报了四个错：三处 `impl<'a> Parser<'a>` 的显式生命周期（新 clippy 已不再报的 lint）、一处 `map(|b| format!(...)).collect()`（`format_collect`，版本间行为漂移）。
+
+教训：**门禁用的工具链版本就是法律，本地验证必须在同一版本上做**。修复后的本地预演命令因此升级为双工具链：
+
+```powershell
+rustup toolchain install 1.85.0 --profile minimal --component clippy
+cargo +1.85.0 clippy --workspace --all-targets --locked -- -D warnings   # CI 视角
+cargo clippy --workspace --all-targets --locked -- -D warnings          # stable 视角
+cargo +1.85.0 test --workspace --locked                                 # MSRV 可测
+```
+
+四个修复（`impl Parser<'_>` ×3、fold 替换 map+collect）在新旧两个 clippy 下都干净——**门禁修复必须同时过两个版本的 lint，只过一边就会在下一次翻车**。
+
 ## 发布流水线（release.yml）
 
 tag `v*` 触发，三步走：

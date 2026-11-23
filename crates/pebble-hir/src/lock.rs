@@ -126,13 +126,16 @@ impl SchemaLock {
         }
         let computed = self.compute_body_hash();
         let stored = self.schema_hash.trim_start_matches("sha256:");
-        if !computed
+        // hex 编码后比较（clippy format_collect：fold 而非 map+collect）
+        let computed_hex: String = computed
             .0
             .iter()
-            .map(|b| format!("{:02x}", b))
-            .collect::<String>()
-            .eq_ignore_ascii_case(stored)
-        {
+            .fold(String::with_capacity(64), |mut s, b| {
+                use std::fmt::Write as _;
+                let _ = write!(s, "{:02x}", b);
+                s
+            });
+        if !computed_hex.eq_ignore_ascii_case(stored) {
             return Err(format!(
                 "schema_hash 与 lock 主体不一致（stored={}, computed={}）",
                 self.schema_hash, computed

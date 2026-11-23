@@ -88,7 +88,7 @@ struct Lowerer<'a> {
     const_failed: bool,
 }
 
-impl<'a> Lowerer<'a> {
+impl Lowerer<'_> {
     fn run(&mut self, pipeline: &ast::Pipeline) -> Option<Hir> {
         // 1. 源节点
         let (mut current_id, mut current_schema) = self.lower_source(&pipeline.source)?;

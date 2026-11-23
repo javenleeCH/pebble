@@ -89,7 +89,7 @@ struct Codegen<'a> {
     lock_of: &'a dyn Fn(&SourceKind) -> Option<SchemaLock>,
 }
 
-impl<'a> Codegen<'a> {
+impl Codegen<'_> {
     fn input_schema_ids(&self, node_id: pebble_hir::NodeId) -> BTreeSet<pebble_hir::FieldId> {
         let mut ids = BTreeSet::new();
         for &input in &self.hir.nodes[node_id as usize].base().inputs {
