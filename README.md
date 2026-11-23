@@ -10,6 +10,7 @@
 
 | 产物 | 位置 |
 |---|---|
+| **从 0 到 1 系列教程（推荐入口，教程驱动开发）** | [`docs/tutorial/README.md`](docs/tutorial/README.md) |
 | 定位与取舍 | [`rationale.md`](rationale.md) |
 | **v3 设计定稿（目标/边界/功能/语法/语义/技术路线）** | [`docs/design-decisions.md`](docs/design-decisions.md) |
 | 第一轮专家评审 | [`docs/review-2026-11-23.md`](docs/review-2026-11-23.md) |

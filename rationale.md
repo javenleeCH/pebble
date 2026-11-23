@@ -1,5 +1,8 @@
 # Pebble Rationale（定位与取舍一页纸）
 
+> **项目第一目标**：让作者完整体验一门语言从立项、实现到落地；语言自身的意义与价值其次。
+> 因此本仓库采用教程驱动开发：实现与 `docs/tutorial/` 同步演进，commit 即教程章节节点。
+>
 > 2026-11-23 第二轮专家评审后修订为 v3。
 > 定稿细则见 [`docs/design-decisions.md`](docs/design-decisions.md)；两轮评审记录见 `docs/review-2026-11-23.md` 与 `docs/review-r2-2026-11-23.md`。
 > 原型尚未开始：以下「可信」均为待验证目标，不是已兑现能力。
