@@ -1,0 +1,25 @@
+{
+  "lock_version": 1,
+  "source": {
+    "kind": "memory_table",
+    "name": "users"
+  },
+  "fields": [
+    {
+      "name": "id",
+      "type": "i64",
+      "optional": false
+    },
+    {
+      "name": "name",
+      "type": "str",
+      "optional": false
+    },
+    {
+      "name": "status",
+      "type": "str",
+      "optional": false
+    }
+  ],
+  "schema_hash": "sha256:84dd0725c4f2d2228578cb1d67f5c6c77b14b30a114becbd93b309c44eaebebf"
+}

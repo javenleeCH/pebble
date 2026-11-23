@@ -1,4 +1,5 @@
 # 预期输出：结果收集到内存回传宿主（collect）
-# 列：id, name；仅保留 status == "valid" 的行
-id,name
+# 列顺序：user_id, name（u.id 经 select as 重命名为 user_id）
+# 仅保留 u.status == "valid" 的行
+user_id,name
 <有效记录行>

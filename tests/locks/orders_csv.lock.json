@@ -1,0 +1,35 @@
+{
+  "lock_version": 1,
+  "source": {
+    "kind": "table",
+    "locator": "tests/data/orders.csv"
+  },
+  "fields": [
+    {
+      "name": "order_id",
+      "type": "i64",
+      "optional": false
+    },
+    {
+      "name": "status",
+      "type": "str",
+      "optional": false
+    },
+    {
+      "name": "amount",
+      "type": "i64",
+      "optional": true
+    },
+    {
+      "name": "score",
+      "type": "f64",
+      "optional": false
+    },
+    {
+      "name": "customer_id",
+      "type": "str",
+      "optional": false
+    }
+  ],
+  "schema_hash": "sha256:d5ea2ebb8680d89d124b2d2ba8e1f60f7ba3497152b83c6f049e4c6ab4541aa8"
+}

@@ -1,0 +1,10 @@
+[package]
+name = "pebble-hir"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+pebble-diagnostic = { path = "../pebble-diagnostic" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }

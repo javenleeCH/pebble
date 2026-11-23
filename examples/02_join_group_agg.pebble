@@ -1,12 +1,18 @@
-// 样例 2：两表关联 + 分组聚合 + 排序 + 取前 N
-// 覆盖：join、group_by、agg(count/sum)、sort、take、write
+// 样例 2：两表关联 + 分组聚合 + 后过滤 + 排序 + 取前 N
+// 覆盖：join(on =)、filter、group_by、agg(count/sum)、select as、sort、take、write
 Table("users.parquet") as u
-  .join(Table("orders.parquet") as o, on: u.id == o.uid)
+  .join(
+    Table("orders.parquet") as o,
+    on = u.id == o.uid,
+  )
+  .filter(o.amount != null)
   .group_by(u.first, u.last)
   .agg(
     order_count = count(),
-    total_amount = sum(o.amount)
+    total_amount = sum(o.amount),
   )
+  .filter(total_amount >= 1000)
+  .select(first, last, order_count, total_amount)
   .sort(total_amount desc)
   .take(100)
   .write("top_users.csv")

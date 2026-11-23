@@ -1,0 +1,11 @@
+order_id,status,amount,score,customer_id
+1,paid,120,1.5,c1
+2,paid,80,2.5,c1
+3,paid,9000,3.5,c2
+4,open,50,0.0,c3
+5,paid,,4.0,c2
+6,paid,3000,5.0,c2
+7,paid,250,6.0,c1
+8,paid,700,7.0,c4
+9,refund,-30,8.0,c5
+10,paid,11000,9.0,c6

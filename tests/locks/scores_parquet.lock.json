@@ -1,0 +1,20 @@
+{
+  "lock_version": 1,
+  "source": {
+    "kind": "table",
+    "locator": "scores.parquet"
+  },
+  "fields": [
+    {
+      "name": "id",
+      "type": "i64",
+      "optional": false
+    },
+    {
+      "name": "score",
+      "type": "f64",
+      "optional": true
+    }
+  ],
+  "schema_hash": "sha256:ba9d386c543ce709e1df5650d1b375ace894bc38e55f5da4f041acbb0fd74a34"
+}

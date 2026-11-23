@@ -1,6 +1,6 @@
 // 样例 6：宿主内存表对接 + 过滤 + 列裁剪 + 回传宿主
-// 覆盖：MemoryTable、filter、select、collect
+// 覆盖：MemoryTable、filter、select as、collect
 MemoryTable("users") as u
-  .filter(|u| u.status == "valid")
-  .select(u.id, u.name)
+  .filter(u.status == "valid")
+  .select(u.id as user_id, u.name)
   .collect()

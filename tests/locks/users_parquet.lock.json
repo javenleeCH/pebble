@@ -1,0 +1,35 @@
+{
+  "lock_version": 1,
+  "source": {
+    "kind": "table",
+    "locator": "users.parquet"
+  },
+  "fields": [
+    {
+      "name": "id",
+      "type": "i64",
+      "optional": false
+    },
+    {
+      "name": "first",
+      "type": "str",
+      "optional": false
+    },
+    {
+      "name": "last",
+      "type": "str",
+      "optional": false
+    },
+    {
+      "name": "age",
+      "type": "i64",
+      "optional": false
+    },
+    {
+      "name": "city",
+      "type": "str",
+      "optional": false
+    }
+  ],
+  "schema_hash": "sha256:eb2b300c6718d6b4cc8a34e3dbd58d526ea10d2b17382fabf78ea0ba7ce8e208"
+}

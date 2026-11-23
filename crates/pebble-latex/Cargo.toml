@@ -1,0 +1,7 @@
+[package]
+name = "pebble-latex"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+pebble-hir = { path = "../pebble-hir" }

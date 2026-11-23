@@ -1,4 +1,4 @@
-(* Pebble 文法草案（阶段 3，Draft v0.1，原型阶段允许随时改）
+(* Pebble 文法草案（阶段 3，Draft v0.2，依据 docs/design-decisions.md v3）
  * 约定：
  *   =      产生式
  *   |      候选分支
@@ -7,41 +7,41 @@
  *   ()     分组
  *   "..."  词法终结符
  * 样例先行：examples/ 下的 .pebble 样例是文法的校验对象。
- * 优先级与表达式细则见 docs/draft/spec/04-expressions.md（草稿，未定稿）。
+ * MVP 不启用：having、cast、时间函数、coalesce/split 等后置特性；
+ * join/distinct/write/print 保留于草案，但标记为“MVP 硬化候选”。
  *)
 
 program        = pipeline , EOF ;
 
-pipeline       = source , { "." , operator } , [ terminal ] ;
+pipeline       = source , { "." , operator } , [ "." , terminal ] ;
 
 source         = ( "Table" | "MemoryTable" ) , "(" , sourceArg , ")" ,
                  [ "as" , ident ] ;
 sourceArg      = stringLiteral | ident ;
 
-operator       = filter | map | select | distinct | sort | take | join
+operator       = filter | extend | select | distinct | sort | take | join
                | groupBy | agg ;
 
-filter         = "filter"  , "(" , lambda , ")" ;
-map            = "map"     , "(" , lambda , ")" ;
-select         = "select"  , "(" , expr , { "," , expr } , ")" ;
-distinct       = "distinct", "(" , ")" ;
-sort           = "sort"    , "(" , sortKey , { "," , sortKey } , ")" ;
-sortKey        = expr , [ ( "asc" | "desc" ) ] ;
-take           = "take"     , "(" , intLiteral , ")" ;
-join           = "join"     , "(" , source , "," , "on" , expr , ")" ;
-groupBy        = "group_by", "(" , expr , { "," , expr } , ")" ;
-agg            = "agg"      , "(" , aggBinding , { "," , aggBinding } , ")" ;
+filter         = "filter"  , "(" , expr , ")" ;
+extend         = "extend"  , "(" , recordLiteral , ")" ;
+select         = "select"  , "(" , selectItem , { "," , selectItem } , [ "," ] , ")" ;
+selectItem     = expr , [ "as" , ident ] ;
+distinct       = "distinct", "(" , ")" ;                       (* MVP 硬化候选 *)
+sort           = "sort"    , "(" , sortKey , { "," , sortKey } , [ "," ] , ")" ;
+sortKey        = expr , [ "asc" | "desc" ] ;
+take           = "take"    , "(" , intLiteral , ")" ;
+join           = "join"    , "(" , source , "," , "on" , "=" , expr , [ "," ] , ")" ;  (* MVP 硬化候选 *)
+groupBy        = "group_by", "(" , expr , { "," , expr } , [ "," ] , ")" ;
+agg            = "agg"     , "(" , aggBinding , { "," , aggBinding } , [ "," ] , ")" ;
 aggBinding     = ident , "=" , aggCall ;
 aggCall        = aggFn , "(" , [ expr ] , ")" ;
 aggFn          = "count" | "sum" | "min" | "max" | "avg" ;
 
-terminal       = "." , ( write | collect | print ) ;
-write          = "write"   , "(" , stringLiteral , ")" ;
+terminal       = write | collect | print ;
+write          = "write"   , "(" , stringLiteral , ")" ;        (* MVP 硬化候选 *)
 collect        = "collect" , "(" , ")" ;
-print          = "print"   , "(" , ")" ;
+print          = "print"   , "(" , ")" ;                       (* MVP 硬化候选 *)
 
-lambda         = "|" , ident , "|" , lambdaBody ;
-lambdaBody     = expr | recordLiteral ;
 recordLiteral  = "{" , binding , { "," , binding } , [ "," ] , "}" ;
 binding        = ident , "=" , expr ;
 
@@ -56,8 +56,8 @@ mulExpr        = unaryExpr , { ( "*" | "/" | "%" ) , unaryExpr } ;
 unaryExpr      = "-" , unaryExpr | postfixExpr ;
 postfixExpr    = primary , { "." , ident } ;
 primary        = ident | literal | "(" , expr , ")" | ifExpr | call ;
-ifExpr         = "if" , "{" , expr , "}" ,
-                 { "else" , "if" , "{" , expr , "}" } ,
+ifExpr         = "if" , expr , "{" , expr , "}" ,
+                 { "else" , "if" , expr , "{" , expr , "}" } ,
                  "else" , "{" , expr , "}" ;
 call           = ident , "(" , [ expr , { "," , expr } ] , ")" ;
 
@@ -66,9 +66,13 @@ literal        = intLiteral | floatLiteral | stringLiteral
 
 (* ---------- 文法约束（语义层强制，非纯文法可表达） ----------
  * 1. pipeline 必须以 source 开头；terminal 之后不得再接 operator。
- * 2. lambda 形参有且仅有一个；lambda 体不得嵌套 lambda。
- * 3. ifExpr 所有分支类型必须一致；必须存在 else 分支。
- * 4. agg 只能紧跟在 group_by 之后；aggCall 仅允许出现在 agg 绑定右侧。
- * 5. join 的右表必须是 source，不得是上游算子结果。
- * 6. 表达式中不得出现赋值、语句或子流水线。
+ * 2. ifExpr 所有分支类型必须一致；必须存在 else 分支。
+ * 3. group_by 之后只能接 agg；aggCall 仅允许出现在 agg 绑定右侧。
+ * 4. join 的右表必须是 source，不得是上游算子结果。
+ * 5. recordLiteral 仅允许作为 extend 的参数出现。
+ * 6. 表达式中不得出现赋值、语句或子流水线；Lambda 已废除，`|` 不再是词法单元。
+ * 7. selectItem 中无 "as" 的 expr 必须是字段引用；复合表达式必须显式命名。
+ * 8. agg 可直接接在任意上游算子后表示全局聚合；group_by + agg 为单个聚合节点。
+ * 9. MVP 的 group_by 键只接受字段引用；表达式分组键及其命名后置。
+ * 10. having/cast/时间函数等 MVP 后置特性保留语法空间，当前草案不启用。
  *)

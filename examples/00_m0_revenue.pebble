@@ -1,0 +1,14 @@
+// M0 杀手级演示：审批后不可偷换的可信变换
+// 证据链：pebble build → 审批 manifest → pebble run（TOCTOU + f64 预检 + 提交工件）→ pebble verify
+Table("tests/data/orders.csv") as o
+  .filter(o.status == "paid" && o.amount != null)
+  .group_by(o.customer_id)
+  .agg(
+    order_count = count(),
+    revenue = sum(o.amount),
+  )
+  .filter(revenue >= 10000)
+  .select(customer_id, order_count, revenue,)
+  .sort(revenue desc,)
+  .take(20)
+  .collect()

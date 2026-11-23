@@ -1,5 +1,7 @@
 # 预期输出：打印到标准输出
 # 列顺序：category, order_count, min_amount, max_amount, avg_amount
-# 按 category 升序；每个品类一行；avg_amount 为 f64；null 金额不计入聚合
+# 按 category 升序（nulls last）；每个品类一行；
+# count() 恒 i64 计行数；min/max/avg 忽略 null 参数，无非空输入时为 null；
+# avg_amount 类型 ?f64；空输入不产生任何分组行
 category,order_count,min_amount,max_amount,avg_amount
 <逐品类聚合结果>

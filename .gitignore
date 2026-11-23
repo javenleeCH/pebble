@@ -9,6 +9,12 @@ target/
 # 临时工具结果
 .tmp-tool-results/
 
+# 本地工具（duckdb CLI 等按需下载，不入库）
+tools/
+
+# build 输出（含生成工件与 receipt）
+examples/target/
+
 # 编辑器 / OS
 .DS_Store
 *.swp

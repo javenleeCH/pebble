@@ -1,0 +1,25 @@
+{
+  "lock_version": 1,
+  "source": {
+    "kind": "table",
+    "locator": "orders.parquet"
+  },
+  "fields": [
+    {
+      "name": "uid",
+      "type": "i64",
+      "optional": false
+    },
+    {
+      "name": "amount",
+      "type": "i64",
+      "optional": true
+    },
+    {
+      "name": "category",
+      "type": "str",
+      "optional": false
+    }
+  ],
+  "schema_hash": "sha256:91cbb66a4be887bc695ac8d46792fedda2a3c2831bd467491067412cdccf579d"
+}

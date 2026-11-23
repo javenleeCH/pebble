@@ -1,5 +1,6 @@
 # 预期输出：打印到标准输出
-# 列顺序：id, level, rounded
-# score 为 null 的行被过滤；level 取值 A / B / C；rounded 为 score 四舍五入后的 f64
+# 列顺序：id, level, rounded（select 投影后仅含这三列，s.id 输出去别名前缀为 id）
+# s.score 为 null 的行被 filter 剔除（判空测试，非普通比较）；
+# level 取值 A / B / C；rounded 为 round(s.score) 的 f64
 id,level,rounded
 <逐行投影结果>

@@ -1,5 +1,6 @@
 # 预期输出：写入文件 top_users.csv
-# 列顺序：first, last, order_count, total_amount
-# 按 total_amount 降序；每个 (first, last) 分组一行；最多 100 行
+# 列顺序：first, last, order_count, total_amount（select 显式投影，去掉源别名前缀）
+# 每个 (u.first, u.last) 分组一行；o.amount 为 null 的行在聚合前被过滤；
+# 仅保留 total_amount >= 1000 的组；按 total_amount 降序，nulls last；最多 100 行
 first,last,order_count,total_amount
 <按 total_amount 降序的分组结果行>

@@ -1,0 +1,20 @@
+[package]
+name = "pebble-driver"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "pebble"
+path = "src/main.rs"
+
+[dependencies]
+pebble-diagnostic = { path = "../pebble-diagnostic" }
+pebble-parser = { path = "../pebble-parser" }
+pebble-hir = { path = "../pebble-hir" }
+pebble-semantics = { path = "../pebble-semantics" }
+pebble-duckdb = { path = "../pebble-duckdb" }
+pebble-latex = { path = "../pebble-latex" }
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }

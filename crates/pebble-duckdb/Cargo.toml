@@ -1,0 +1,12 @@
+[package]
+name = "pebble-duckdb"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+pebble-hir = { path = "../pebble-hir" }
+
+[dev-dependencies]
+pebble-diagnostic = { path = "../pebble-diagnostic" }
+pebble-parser = { path = "../pebble-parser" }
+pebble-semantics = { path = "../pebble-semantics" }

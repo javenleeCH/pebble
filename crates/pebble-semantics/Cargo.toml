@@ -1,0 +1,9 @@
+[package]
+name = "pebble-semantics"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+pebble-diagnostic = { path = "../pebble-diagnostic" }
+pebble-parser = { path = "../pebble-parser" }
+pebble-hir = { path = "../pebble-hir" }

@@ -1,38 +1,44 @@
 # Pebble 文档与阶段状态
 
-> 流程：rationale → 样例 → 文法草案 → MVP 原型 → 规范固化 → 内测收敛 → 白皮书 → 发布。
-> 正式 Spec 只收录原型跑通、验证稳定的特性；当前仓库内所有规范类文件均为**草稿**。
+> 当前权威入口是 [`design-decisions.md`](design-decisions.md) v3。
+> 两轮专家评审后，规范、文法、AST/HIR 和样例已完成一轮同步；原型实现尚未开始。
+> 后端路线：DuckDB（MVP）→ Polars（M3）→ Cranelift/MLIR 原生后端（M4）。
 
-## 当前阶段产物（阶段 1–3）
+## 定稿与评审
 
-| 阶段 | 产物 | 位置 |
-|---|---|---|
-| 1. 定位取舍 | Rationale 一页纸：定位、用户、取舍拍板、MVP 边界、红线 | [`../rationale.md`](../rationale.md) |
-| 2. 样例先行 | 6 个 `.pebble` 样例 + 同名 `.expected` 预期输出 | [`../examples/`](../examples/) |
-| 3. 文法草案 | EBNF 草稿，原型阶段允许随时改 | [`../grammar/pebble.ebnf`](../grammar/pebble.ebnf) |
-| 4. 原型骨架 | crate 目录占位，暂不写实现 | [`../crates/`](../crates/)、[`../tests/`](../tests/) |
+| 产物 | 位置 |
+|---|---|
+| v3 设计定稿：目标、边界、功能、语法、语义、后端路线 | [`design-decisions.md`](design-decisions.md) |
+| 第一轮专家评审 | [`review-2026-11-23.md`](review-2026-11-23.md) |
+| 第二轮专家复审 | [`review-r2-2026-11-23.md`](review-r2-2026-11-23.md) |
+| 定位与取舍一页纸 | [`../rationale.md`](../rationale.md) |
 
-## 草稿设计笔记（docs/draft/，未定稿）
+## 语言规范（draft/spec/）
 
-原型验证前不固化，仅供实现期对照；后续按流程分批修订并入正式 Spec。
+以下章节已按 v3 同步，仍属于原型前规范草案；实现必须通过规范测试后才固化为正式 Spec。
 
-### spec/（语言规范草稿）
+- `01-overview.md`：定位、边界、语义模型、红线、后端路线
+- `02-lexical.md`：词法；无 Lambda `|param|`
+- `04-expressions.md`：表达式、优先级、作用域、if、内置函数
+- `05-type-system.md`：类型、Schema、Kleene、非空保证、checked-null、聚合签名
+- `06-operators.md`：算子目录、全局聚合、MVP 状态
+- `07-semantics.md`：唯一数据语义、顺序哨兵、值同一性、部分函数
+- `08-diagnostics.md`：编译期与执行期诊断分类
 
-- `01-overview.md` 定位、边界、语义模型、红线
-- `02-lexical.md` 词法规范
-- `04-expressions.md` 表达式、优先级、Lambda、if 表达式
-- `05-type-system.md` 类型系统与 Schema 推导
-- `06-operators.md` 算子目录
-- `07-semantics.md` 语义规则
-- `08-diagnostics.md` 错误分类与错误码
+## 内部设计（draft/design/）
 
-### design/（内部结构草案）
+- `ast.md`：无 Lambda AST、extend/select alias、分组/全局聚合
+- `hir.md`：稳定字段身份、canonical HIR、BackendArtifact、Manifest/Receipt、多后端边界
 
-- `ast.md` AST 节点定义草案
-- `hir.md` HIR DAG 结构与 AST → HIR 映射草案
+## 文法与样例
+
+- [`../grammar/pebble.ebnf`](../grammar/pebble.ebnf)：Draft v0.2
+- [`../examples/`](../examples/)：6 个新语法样例及预期输出
 
 ## 流程纪律
 
-1. 新特性先过 `rationale.md`：不符合定位就砍。
-2. 先写 / 改样例，再文法，再实现；原型阶段推翻设计属于正常迭代。
-3. 原型跑通前，不在此目录沉淀对外正式规范。
+1. 新特性先过 `rationale.md` 和五条红线。
+2. 先写/改样例，再文法和语义规则，再实现；禁止用后端默认行为填补规范空白。
+3. 每个保留语法必须有唯一类型与取值规则，并通过 null、溢出、空输入和作用域反例测试。
+4. MVP 先闭环 DuckDB 证据链；多后端不得反向分裂语言语义。
+5. Cranelift/MLIR 属 M4 正式原生后端路线，研究原型和基准可先行，但不阻塞 DuckDB 首发。
