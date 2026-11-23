@@ -11,9 +11,9 @@
 
 use pebble_diagnostic::{Code, DiagBag, Span};
 use pebble_hir::{
-    canonical, AggBindingH, AggCallH, AggFunc, BuiltinFn, BinOp, FieldId, FieldOrigin,
-    FieldSchema, Hir, HirNode, NodeBase, NodeId, Projection, Schema, SchemaLock, SEMANTICS_VERSION,
-    SortKeyH, SourceId, SourceKind, TerminalKind, THirExpr, TransformKind, Type, UnaryOp,
+    AggBindingH, AggCallH, AggFunc, BinOp, BuiltinFn, FieldId, FieldOrigin, FieldSchema, Hir,
+    HirNode, NodeBase, NodeId, Projection, SEMANTICS_VERSION, Schema, SchemaLock, SortKeyH,
+    SourceId, SourceKind, THirExpr, TerminalKind, TransformKind, Type, UnaryOp, canonical,
 };
 use pebble_parser::ast;
 use std::collections::{BTreeMap, BTreeSet};
@@ -112,8 +112,13 @@ impl<'a> Lowerer<'a> {
                         );
                         return None;
                     };
-                    let (node_id, schema) =
-                        self.lower_aggregate(current_id, &current_schema, Some(keys), agg_bindings, *agg_span)?;
+                    let (node_id, schema) = self.lower_aggregate(
+                        current_id,
+                        &current_schema,
+                        Some(keys),
+                        agg_bindings,
+                        *agg_span,
+                    )?;
                     current_id = node_id;
                     current_schema = schema;
                     i += 2;
@@ -123,8 +128,13 @@ impl<'a> Lowerer<'a> {
                     span: agg_span,
                 } => {
                     // 全局聚合（不接 group_by）
-                    let (node_id, schema) =
-                        self.lower_aggregate(current_id, &current_schema, None, bindings, *agg_span)?;
+                    let (node_id, schema) = self.lower_aggregate(
+                        current_id,
+                        &current_schema,
+                        None,
+                        bindings,
+                        *agg_span,
+                    )?;
                     current_id = node_id;
                     current_schema = schema;
                     i += 1;
@@ -135,15 +145,12 @@ impl<'a> Lowerer<'a> {
                     self.check_predicate(&resolved)?;
                     self.const_domain_check(&resolved);
                     let narrowed = self.narrow(&current_schema, &resolved);
-                    let node_id = self.push_node(
-                        vec![current_id],
-                        narrowed,
-                        *span,
-                        |base| HirNode::Transform {
+                    let node_id = self.push_node(vec![current_id], narrowed, *span, |base| {
+                        HirNode::Transform {
                             base,
                             kind: TransformKind::Filter { pred: resolved },
-                        },
-                    );
+                        }
+                    });
                     current_schema = self.nodes[node_id as usize].base().output.clone();
                     current_id = node_id;
                     i += 1;
@@ -218,17 +225,15 @@ impl<'a> Lowerer<'a> {
                             });
                         }
                     }
-                    let node_id = self.push_node(
-                        vec![current_id],
-                        Schema { fields },
-                        *span,
-                        |base| HirNode::Transform {
-                            base,
-                            kind: TransformKind::Extend {
-                                bindings: hir_bindings,
-                            },
-                        },
-                    );
+                    let node_id =
+                        self.push_node(vec![current_id], Schema { fields }, *span, |base| {
+                            HirNode::Transform {
+                                base,
+                                kind: TransformKind::Extend {
+                                    bindings: hir_bindings,
+                                },
+                            }
+                        });
                     current_schema = self.nodes[node_id as usize].base().output.clone();
                     current_id = node_id;
                     i += 1;
@@ -274,9 +279,7 @@ impl<'a> Lowerer<'a> {
                                 let resolved =
                                     self.resolve_expr(&item.expr, &current_schema, false)?;
                                 self.const_domain_check(&resolved);
-                                if let Some(prev) =
-                                    seen_names.insert(alias.clone(), item.span)
-                                {
+                                if let Some(prev) = seen_names.insert(alias.clone(), item.span) {
                                     self.diags.error(
                                         Code::SchDuplicateOutput,
                                         format!("select 输出名称 `{}` 重复", alias),
@@ -305,9 +308,7 @@ impl<'a> Lowerer<'a> {
                     }
                     let node_id = self.push_node(
                         vec![current_id],
-                        Schema {
-                            fields: out_fields,
-                        },
+                        Schema { fields: out_fields },
                         *span,
                         |base| HirNode::Transform {
                             base,
@@ -320,15 +321,13 @@ impl<'a> Lowerer<'a> {
                 }
                 ast::Op::Distinct { span } => {
                     self.history.push(current_schema.clone());
-                    let node_id = self.push_node(
-                        vec![current_id],
-                        current_schema.clone(),
-                        *span,
-                        |base| HirNode::Transform {
-                            base,
-                            kind: TransformKind::Distinct,
-                        },
-                    );
+                    let node_id =
+                        self.push_node(vec![current_id], current_schema.clone(), *span, |base| {
+                            HirNode::Transform {
+                                base,
+                                kind: TransformKind::Distinct,
+                            }
+                        });
                     current_id = node_id;
                     i += 1;
                 }
@@ -355,37 +354,30 @@ impl<'a> Lowerer<'a> {
                             descending: k.descending,
                         });
                     }
-                    let node_id = self.push_node(
-                        vec![current_id],
-                        current_schema.clone(),
-                        *span,
-                        |base| HirNode::Transform {
-                            base,
-                            kind: TransformKind::Sort { keys: hir_keys },
-                        },
-                    );
+                    let node_id =
+                        self.push_node(vec![current_id], current_schema.clone(), *span, |base| {
+                            HirNode::Transform {
+                                base,
+                                kind: TransformKind::Sort { keys: hir_keys },
+                            }
+                        });
                     current_id = node_id;
                     i += 1;
                 }
                 ast::Op::Take { n, span } => {
                     if *n < 0 {
-                        self.diags.error(
-                            Code::SemTypeMismatch,
-                            "take 的参数必须是非负整数",
-                            *span,
-                        );
+                        self.diags
+                            .error(Code::SemTypeMismatch, "take 的参数必须是非负整数", *span);
                         return None;
                     }
                     self.history.push(current_schema.clone());
-                    let node_id = self.push_node(
-                        vec![current_id],
-                        current_schema.clone(),
-                        *span,
-                        |base| HirNode::Transform {
-                            base,
-                            kind: TransformKind::Take { n: *n },
-                        },
-                    );
+                    let node_id =
+                        self.push_node(vec![current_id], current_schema.clone(), *span, |base| {
+                            HirNode::Transform {
+                                base,
+                                kind: TransformKind::Take { n: *n },
+                            }
+                        });
                     current_id = node_id;
                     i += 1;
                 }
@@ -403,15 +395,13 @@ impl<'a> Lowerer<'a> {
                     let resolved = self.resolve_expr(on, &combined, true)?;
                     self.check_predicate(&resolved)?;
                     self.const_domain_check(&resolved);
-                    let node_id = self.push_node(
-                        vec![current_id, right_id],
-                        combined,
-                        *span,
-                        |base| HirNode::Transform {
-                            base,
-                            kind: TransformKind::Join { on: resolved },
-                        },
-                    );
+                    let node_id =
+                        self.push_node(vec![current_id, right_id], combined, *span, |base| {
+                            HirNode::Transform {
+                                base,
+                                kind: TransformKind::Join { on: resolved },
+                            }
+                        });
                     current_schema = self.nodes[node_id as usize].base().output.clone();
                     current_id = node_id;
                     i += 1;
@@ -437,15 +427,9 @@ impl<'a> Lowerer<'a> {
             ast::TerminalOp::Collect { .. } => TerminalKind::Collect,
             ast::TerminalOp::Print { .. } => TerminalKind::Print,
         };
-        let root = self.push_node(
-            vec![current_id],
-            current_schema,
-            terminal.span(),
-            |base| HirNode::Terminal {
-                base,
-                kind,
-            },
-        );
+        let root = self.push_node(vec![current_id], current_schema, terminal.span(), |base| {
+            HirNode::Terminal { base, kind }
+        });
 
         let hir = Hir {
             nodes: std::mem::take(&mut self.nodes),
@@ -573,7 +557,8 @@ impl<'a> Lowerer<'a> {
                         return None;
                     }
                 };
-                let resolved = self.resolve_field(field_expr.0, field_expr.1, field_expr.2, input_schema)?;
+                let resolved =
+                    self.resolve_field(field_expr.0, field_expr.1, field_expr.2, input_schema)?;
                 let name = field_expr.1.clone();
                 if let Some(prev) = key_names.insert(name.clone(), k.span) {
                     self.diags.error(
@@ -666,13 +651,9 @@ impl<'a> Lowerer<'a> {
             });
         }
         for b in &hir_bindings {
-            let ty = self.agg_result_type(
-                &b.call.func,
-                b.call.arg.as_ref(),
-                grouped,
-                span,
-            )
-            .expect("已校验");
+            let ty = self
+                .agg_result_type(&b.call.func, b.call.arg.as_ref(), grouped, span)
+                .expect("已校验");
             fields.push(FieldSchema {
                 id: b.output,
                 name: b.name.clone(),
@@ -684,16 +665,13 @@ impl<'a> Lowerer<'a> {
             });
         }
 
-        let node_id = self.push_node(
-            vec![input_id],
-            Schema { fields },
-            span,
-            |base| HirNode::Aggregate {
+        let node_id = self.push_node(vec![input_id], Schema { fields }, span, |base| {
+            HirNode::Aggregate {
                 base,
                 group_keys,
                 bindings: hir_bindings,
-            },
-        );
+            }
+        });
         debug_assert_eq!(node_id, node_id_placeholder);
         let schema = self.nodes[node_id as usize].base().output.clone();
         Some((node_id, schema))
@@ -779,9 +757,7 @@ impl<'a> Lowerer<'a> {
     ) -> Option<THirExpr> {
         match expr {
             ast::Expr::Literal(lit, span) => self.literal(lit, *span),
-            ast::Expr::Field { alias, name, span } => {
-                self.resolve_field(alias, name, *span, env)
-            }
+            ast::Expr::Field { alias, name, span } => self.resolve_field(alias, name, *span, env),
             ast::Expr::Binary {
                 op,
                 left,
@@ -859,7 +835,8 @@ impl<'a> Lowerer<'a> {
             } => {
                 let cond = self.resolve_with_base(condition, env, Some(Type::Bool), in_join_on)?;
                 if !matches!(cond.ty().base(), Type::Bool) {
-                    self.diags.error(Code::SemPredicateNotBool, "if 条件必须是 bool/?bool", *span);
+                    self.diags
+                        .error(Code::SemPredicateNotBool, "if 条件必须是 bool/?bool", *span);
                     return None;
                 }
                 // null 分支经另一分支推导基础类型；两侧均为 null 报 SEM-008（05 §5.2）
@@ -950,7 +927,11 @@ impl<'a> Lowerer<'a> {
             ast::Literal::Int(v) => (pebble_hir::Literal::Int(*v), Type::I64),
             ast::Literal::Float(v) => {
                 if !v.is_finite() {
-                    self.diags.error(Code::SemLiteralOutOfRange, "浮点字面量超出有限 f64 值域", span);
+                    self.diags.error(
+                        Code::SemLiteralOutOfRange,
+                        "浮点字面量超出有限 f64 值域",
+                        span,
+                    );
                     return None;
                 }
                 (pebble_hir::Literal::Float(*v), Type::F64)
@@ -967,11 +948,7 @@ impl<'a> Lowerer<'a> {
                 return None;
             }
         };
-        Some(THirExpr::Literal {
-            value,
-            ty,
-            span,
-        })
+        Some(THirExpr::Literal { value, ty, span })
     }
 
     fn resolve_binary(
@@ -983,8 +960,8 @@ impl<'a> Lowerer<'a> {
         env: &Schema,
         in_join_on: bool,
     ) -> Option<THirExpr> {
-        use ast::BinOp::*;
         use Type::*;
+        use ast::BinOp::*;
 
         // 判空特殊形式：x == null / x != null（含 null == x）
         if matches!(op, Eq | Neq) {
@@ -997,7 +974,11 @@ impl<'a> Lowerer<'a> {
                 });
             }
             if r_null || l_null {
-                let (x, x_span) = if r_null { (left, left.span()) } else { (right, right.span()) };
+                let (x, x_span) = if r_null {
+                    (left, left.span())
+                } else {
+                    (right, right.span())
+                };
                 let inner = self.resolve_expr(x, env, in_join_on)?;
                 let is_null = THirExpr::Call {
                     name: BuiltinFn::IsNull,
@@ -1171,11 +1152,13 @@ impl<'a> Lowerer<'a> {
         // is_null：任意标量参数，恒返回 bool
         if func == IsNull {
             if args.len() != 1 {
-                self.diags.error(Code::SemTypeMismatch, "is_null 恰好接收一个参数", span);
+                self.diags
+                    .error(Code::SemTypeMismatch, "is_null 恰好接收一个参数", span);
                 return None;
             }
             if is_null_literal(&args[0]) {
-                self.diags.error(Code::SemNullMisuse, "is_null(null) 无法确定基础类型", span);
+                self.diags
+                    .error(Code::SemNullMisuse, "is_null(null) 无法确定基础类型", span);
                 return None;
             }
             let inner = self.resolve_expr(&args[0], env, in_join_on)?;
@@ -1190,11 +1173,13 @@ impl<'a> Lowerer<'a> {
         // abs：按参数基础类型分派
         if func == Abs {
             if args.len() != 1 {
-                self.diags.error(Code::SemTypeMismatch, "abs 恰好接收一个参数", span);
+                self.diags
+                    .error(Code::SemTypeMismatch, "abs 恰好接收一个参数", span);
                 return None;
             }
             if is_null_literal(&args[0]) {
-                self.diags.error(Code::SemNullMisuse, "abs(null) 无法确定数值基础类型", span);
+                self.diags
+                    .error(Code::SemNullMisuse, "abs(null) 无法确定数值基础类型", span);
                 return None;
             }
             let inner = self.resolve_expr(&args[0], env, in_join_on)?;
@@ -1208,7 +1193,8 @@ impl<'a> Lowerer<'a> {
                     }
                 }
                 _ => {
-                    self.diags.error(Code::SemOpUnsupported, "abs 的参数必须是 i64/f64", span);
+                    self.diags
+                        .error(Code::SemOpUnsupported, "abs 的参数必须是 i64/f64", span);
                     return None;
                 }
             };
@@ -1239,7 +1225,12 @@ impl<'a> Lowerer<'a> {
             if !types_unify(r.ty().base(), base) {
                 self.diags.error(
                     Code::SemOpUnsupported,
-                    format!("`{}` 的参数类型应为 {}，实际 {}", name, base.render(), r.ty().render()),
+                    format!(
+                        "`{}` 的参数类型应为 {}，实际 {}",
+                        name,
+                        base.render(),
+                        r.ty().render()
+                    ),
                     arg.span(),
                 );
                 return None;
@@ -1291,9 +1282,10 @@ impl<'a> Lowerer<'a> {
                     .fields
                     .iter()
                     .filter(|f| match &f.origin {
-                        FieldOrigin::Source { source, source_field } => {
-                            *source == source_id && source_field == name
-                        }
+                        FieldOrigin::Source {
+                            source,
+                            source_field,
+                        } => *source == source_id && source_field == name,
                         FieldOrigin::Derived { .. } => false,
                     })
                     .collect();
@@ -1354,9 +1346,11 @@ impl<'a> Lowerer<'a> {
                             self.aliases
                                 .get(a)
                                 .map(|&sid| {
-                                    s.fields.iter().any(|f| matches!(&f.origin,
+                                    s.fields.iter().any(|f| {
+                                        matches!(&f.origin,
                                         FieldOrigin::Source { source, source_field }
-                                            if *source == sid && source_field == name))
+                                            if *source == sid && source_field == name)
+                                    })
                                 })
                                 .unwrap_or(false)
                         })
@@ -1367,7 +1361,10 @@ impl<'a> Lowerer<'a> {
                 if ever {
                     self.diags.error_hint(
                         Code::SemOutOfScope,
-                        format!("字段 `{}` 超出当前作用域（SEM-012）", display_ref(alias, name)),
+                        format!(
+                            "字段 `{}` 超出当前作用域（SEM-012）",
+                            display_ref(alias, name)
+                        ),
                         span,
                         format!("当前可见字段: {}", self.visible_fields(env)),
                     );
@@ -1562,7 +1559,12 @@ fn nn_walk(e: &THirExpr, out: &mut BTreeSet<FieldId>) {
                     else_path.insert(*field);
                 }
             }
-            out.extend(then_path.intersection(&else_path).cloned().collect::<BTreeSet<_>>());
+            out.extend(
+                then_path
+                    .intersection(&else_path)
+                    .cloned()
+                    .collect::<BTreeSet<_>>(),
+            );
         }
         _ => {}
     }
@@ -1626,7 +1628,7 @@ fn const_val(e: &THirExpr) -> Result<ConstVal, Span> {
                     None => return Err(*span),
                 },
                 (BinOp::Div | BinOp::Mod, ConstVal::Float(_), ConstVal::Float(0.0)) => {
-                    return Err(*span)
+                    return Err(*span);
                 }
                 (BinOp::Add | BinOp::Sub | BinOp::Mul, ConstVal::Float(a), ConstVal::Float(b)) => {
                     let v = match op {
@@ -1780,9 +1782,21 @@ mod tests {
                 data_file: Some("orders.csv".into()),
             },
             vec![
-                LockField { name: "status".into(), ty: LockType::Str, optional: false },
-                LockField { name: "amount".into(), ty: LockType::I64, optional: true },
-                LockField { name: "customer_id".into(), ty: LockType::Str, optional: false },
+                LockField {
+                    name: "status".into(),
+                    ty: LockType::Str,
+                    optional: false,
+                },
+                LockField {
+                    name: "amount".into(),
+                    ty: LockType::I64,
+                    optional: true,
+                },
+                LockField {
+                    name: "customer_id".into(),
+                    ty: LockType::Str,
+                    optional: false,
+                },
             ],
         );
         let scores = SchemaLock::build(
@@ -1790,8 +1804,16 @@ mod tests {
                 locator: "scores.parquet".into(),
             },
             vec![
-                LockField { name: "id".into(), ty: LockType::I64, optional: false },
-                LockField { name: "score".into(), ty: LockType::F64, optional: true },
+                LockField {
+                    name: "id".into(),
+                    ty: LockType::I64,
+                    optional: false,
+                },
+                LockField {
+                    name: "score".into(),
+                    ty: LockType::F64,
+                    optional: true,
+                },
             ],
         );
         Catalog::from_locks(vec![orders, scores])
@@ -1815,7 +1837,11 @@ mod tests {
             diags.diags.iter().any(|d| d.code.as_str() == code),
             "expected {}, got {:?} in {}",
             code,
-            diags.diags.iter().map(|d| d.code.as_str()).collect::<Vec<_>>(),
+            diags
+                .diags
+                .iter()
+                .map(|d| d.code.as_str())
+                .collect::<Vec<_>>(),
             src
         );
         diags
@@ -1863,7 +1889,10 @@ Table("scores.parquet") as s
             .iter()
             .find(|f| f.name == "score")
             .expect("score 字段");
-        assert!(matches!(score.ty, Type::F64), "filter 后 score 应收缩为非空 f64");
+        assert!(
+            matches!(score.ty, Type::F64),
+            "filter 后 score 应收缩为非空 f64"
+        );
     }
 
     #[test]
@@ -1963,16 +1992,26 @@ MemoryTable("orders") as o
         // SEM-011 join 后同名字段裸引用歧义
         let cat = Catalog::from_locks(vec![
             SchemaLock::build(
-                LockSource::MemoryTable { name: "a".into(), data_file: None },
-                vec![
-                    LockField { name: "id".into(), ty: LockType::I64, optional: false },
-                ],
+                LockSource::MemoryTable {
+                    name: "a".into(),
+                    data_file: None,
+                },
+                vec![LockField {
+                    name: "id".into(),
+                    ty: LockType::I64,
+                    optional: false,
+                }],
             ),
             SchemaLock::build(
-                LockSource::MemoryTable { name: "b".into(), data_file: None },
-                vec![
-                    LockField { name: "id".into(), ty: LockType::I64, optional: false },
-                ],
+                LockSource::MemoryTable {
+                    name: "b".into(),
+                    data_file: None,
+                },
+                vec![LockField {
+                    name: "id".into(),
+                    ty: LockType::I64,
+                    optional: false,
+                }],
             ),
         ]);
         let src = "MemoryTable(\"a\") as x\n  .join(MemoryTable(\"b\") as y, on = x.id == y.id)\n  .filter(id > 0)\n  .collect()\n";
@@ -1984,12 +2023,26 @@ MemoryTable("orders") as o
         // SCH-002 join 键类型不一致（i64 vs string）
         let cat2 = Catalog::from_locks(vec![
             SchemaLock::build(
-                LockSource::MemoryTable { name: "a".into(), data_file: None },
-                vec![LockField { name: "id".into(), ty: LockType::I64, optional: false }],
+                LockSource::MemoryTable {
+                    name: "a".into(),
+                    data_file: None,
+                },
+                vec![LockField {
+                    name: "id".into(),
+                    ty: LockType::I64,
+                    optional: false,
+                }],
             ),
             SchemaLock::build(
-                LockSource::MemoryTable { name: "b".into(), data_file: None },
-                vec![LockField { name: "id".into(), ty: LockType::Str, optional: false }],
+                LockSource::MemoryTable {
+                    name: "b".into(),
+                    data_file: None,
+                },
+                vec![LockField {
+                    name: "id".into(),
+                    ty: LockType::Str,
+                    optional: false,
+                }],
             ),
         ]);
         let src2 = "MemoryTable(\"a\") as x\n  .join(MemoryTable(\"b\") as y, on = x.id == y.id)\n  .collect()\n";
@@ -2028,7 +2081,11 @@ MemoryTable("orders") as o
         let a = compile_ok(M0);
         let commented = M0.replace(".filter(", "// 审批要点：过滤已支付订单\n  .filter(");
         let b = compile_ok(&commented);
-        assert_eq!(hir_hash(&a), hir_hash(&b), "注释/空白不得影响 canonical hash");
+        assert_eq!(
+            hir_hash(&a),
+            hir_hash(&b),
+            "注释/空白不得影响 canonical hash"
+        );
     }
 
     #[test]

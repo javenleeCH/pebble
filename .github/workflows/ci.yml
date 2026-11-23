@@ -1,0 +1,90 @@
+name: CI
+
+# 门禁参考 uniEtract 模式：MSRV 锁定构建 + 双 OS 矩阵验证 + 项目契约检查。
+# 本项目特有门禁：
+#   - 教程契约（docs_gate）：教程驱动开发——教程章节/样例/文法文件必须与实现共存
+#   - DuckDB 端到端四幕：build → run → verify 在真实 DuckDB 上闭环
+on:
+  push:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  DUCKDB_VERSION: "1.4.1"
+
+jobs:
+  msrv:
+    name: MSRV (Rust 1.85) locked
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # 1.85 是 edition 2024 的下限，也是本仓库声明的 rust-version（clippy msrv 依据）。
+      - uses: dtolnay/rust-toolchain@1.85.0
+      - name: Build with frozen dependencies
+        run: cargo build --locked --all-targets
+      - name: Tests with frozen dependencies
+        run: cargo test --locked --all-targets
+
+  verify:
+    name: Verify (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      # 与 MSRV 一致的 pin 基线：`-D warnings` 在移动的 stable 上会因无关新 lint 失败。
+      - uses: dtolnay/rust-toolchain@1.85.0
+        with:
+          components: rustfmt, clippy
+      - name: Format
+        run: cargo fmt --all --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Unit + integration tests（缺 duckdb 时端到端自动跳过）
+        run: cargo test --workspace --all-targets --locked
+
+      - name: Setup DuckDB CLI (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          mkdir -p tools
+          curl -sL --retry 3 -o /tmp/duckdb.zip "https://github.com/duckdb/duckdb/releases/download/v${DUCKDB_VERSION}/duckdb_cli-linux-amd64.zip"
+          unzip -o /tmp/duckdb.zip -d tools
+          tools/duckdb -version
+
+      - name: Setup DuckDB CLI (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path tools | Out-Null
+          curl.exe -sL --retry 3 -o "$env:TEMP\duckdb.zip" "https://github.com/duckdb/duckdb/releases/download/v${env:DUCKDB_VERSION}/duckdb_cli-windows-amd64.zip"
+          Expand-Archive -Path "$env:TEMP\duckdb.zip" -DestinationPath tools -Force
+          tools\duckdb.exe -version
+
+      - name: Evidence-chain e2e on real DuckDB
+        run: cargo test --workspace --test evidence_chain --locked -- --nocapture
+
+      - name: Tutorial contract gate（教程驱动开发）
+        run: cargo test -p pebble-driver --test docs_gate --locked
+
+      - name: Four-act demo smoke（README 快速上手即门禁）
+        shell: bash
+        run: |
+          set -e
+          cargo run -q -p pebble-driver -- build examples/00_m0_revenue.pebble --locks tests/locks
+          cargo run -q -p pebble-driver -- run examples/target/pebble/00_m0_revenue
+          cargo run -q -p pebble-driver -- verify \
+            examples/target/pebble/00_m0_revenue/manifest.json \
+            examples/target/pebble/00_m0_revenue/receipt.json
+
+      - name: Release build
+        run: cargo build --release --locked
+
+      - name: Binary version smoke
+        shell: bash
+        run: |
+          BIN=target/release/pebble
+          [ "$RUNNER_OS" = "Windows" ] && BIN=target/release/pebble.exe
+          $BIN --version
+          $BIN --help >/dev/null

@@ -24,11 +24,7 @@ impl LockType {
             LockType::Bool => Type::Bool,
             LockType::Str => Type::Str,
         };
-        if optional {
-            base.opt()
-        } else {
-            base
-        }
+        if optional { base.opt() } else { base }
     }
 
     pub fn from_type(ty: &Type) -> Option<LockType> {
@@ -130,7 +126,13 @@ impl SchemaLock {
         }
         let computed = self.compute_body_hash();
         let stored = self.schema_hash.trim_start_matches("sha256:");
-        if !computed.0.iter().map(|b| format!("{:02x}", b)).collect::<String>().eq_ignore_ascii_case(stored) {
+        if !computed
+            .0
+            .iter()
+            .map(|b| format!("{:02x}", b))
+            .collect::<String>()
+            .eq_ignore_ascii_case(stored)
+        {
             return Err(format!(
                 "schema_hash 与 lock 主体不一致（stored={}, computed={}）",
                 self.schema_hash, computed

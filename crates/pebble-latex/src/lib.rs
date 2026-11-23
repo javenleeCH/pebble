@@ -4,7 +4,7 @@
 //! sort/take 是「代数外表示层算子」，以 τ/topN 标注并显式注明。
 
 use pebble_hir::{
-    AggFunc, BuiltinFn, BinOp, FieldId, Hir, HirNode, SourceKind, THirExpr, TransformKind, Type,
+    AggFunc, BinOp, BuiltinFn, FieldId, Hir, HirNode, SourceKind, THirExpr, TransformKind, Type,
     UnaryOp,
 };
 use std::collections::BTreeMap;
@@ -14,14 +14,16 @@ use std::fmt::Write as _;
 pub fn algebra_view(hir: &Hir) -> String {
     let names = field_names(hir);
     let mut formula = emit_node(hir, hir.root, &names);
-    if let HirNode::Terminal { kind, .. } = &hir.nodes[hir.root as usize] {
-        if let pebble_hir::TerminalKind::Write { path } = kind {
-            let _ = write!(
-                &mut formula,
-                " \\;\\longrightarrow\\; \\texttt{{{}}}",
-                escape(path)
-            );
-        }
+    if let HirNode::Terminal {
+        kind: pebble_hir::TerminalKind::Write { path },
+        ..
+    } = &hir.nodes[hir.root as usize]
+    {
+        let _ = write!(
+            &mut formula,
+            " \\;\\longrightarrow\\; \\texttt{{{}}}",
+            escape(path)
+        );
     }
     formula
 }
@@ -77,13 +79,7 @@ fn emit_node(hir: &Hir, id: pebble_hir::NodeId, names: &BTreeMap<FieldId, String
                 TransformKind::Extend { bindings } => {
                     let list: Vec<String> = bindings
                         .iter()
-                        .map(|b| {
-                            format!(
-                                "{}={}",
-                                escape(&b.name),
-                                emit_expr(&b.value, names)
-                            )
-                        })
+                        .map(|b| format!("{}={}", escape(&b.name), emit_expr(&b.value, names)))
                         .collect();
                     format!(
                         "\\varepsilon_{{{}}}\\left({}\\right)",
@@ -92,15 +88,8 @@ fn emit_node(hir: &Hir, id: pebble_hir::NodeId, names: &BTreeMap<FieldId, String
                     )
                 }
                 TransformKind::Select { projections } => {
-                    let list: Vec<String> = projections
-                        .iter()
-                        .map(|p| escape(&p.name))
-                        .collect();
-                    format!(
-                        "\\pi_{{{}}}\\left({}\\right)",
-                        list.join(",\\; "),
-                        inner
-                    )
+                    let list: Vec<String> = projections.iter().map(|p| escape(&p.name)).collect();
+                    format!("\\pi_{{{}}}\\left({}\\right)", list.join(",\\; "), inner)
                 }
                 TransformKind::Distinct => format!("\\delta\\left({}\\right)", inner),
                 TransformKind::Sort { keys } => {
@@ -115,11 +104,7 @@ fn emit_node(hir: &Hir, id: pebble_hir::NodeId, names: &BTreeMap<FieldId, String
                             }
                         })
                         .collect();
-                    format!(
-                        "\\tau_{{{}}}\\left({}\\right)",
-                        list.join(",\\; "),
-                        inner
-                    )
+                    format!("\\tau_{{{}}}\\left({}\\right)", list.join(",\\; "), inner)
                 }
                 TransformKind::Take { n } => {
                     format!("\\mathrm{{top}}_{{{}}}\\left({}\\right)", n, inner)
@@ -141,10 +126,7 @@ fn emit_node(hir: &Hir, id: pebble_hir::NodeId, names: &BTreeMap<FieldId, String
             bindings,
         } => {
             let inner = emit_node(hir, base.inputs[0], names);
-            let keys: Vec<String> = group_keys
-                .iter()
-                .map(|k| escape(&k.name))
-                .collect();
+            let keys: Vec<String> = group_keys.iter().map(|k| escape(&k.name)).collect();
             let aggs: Vec<String> = bindings
                 .iter()
                 .map(|b| {
@@ -193,7 +175,10 @@ fn emit_expr(e: &THirExpr, names: &BTreeMap<FieldId, String>) -> String {
             pebble_hir::Literal::Null => "\\mathrm{null}".to_string(),
         },
         THirExpr::Field { field, .. } => {
-            format!("\\mathrm{{{}}}", escape(names.get(field).map(|s| s.as_str()).unwrap_or("?")))
+            format!(
+                "\\mathrm{{{}}}",
+                escape(names.get(field).map(|s| s.as_str()).unwrap_or("?"))
+            )
         }
         THirExpr::Binary {
             op, left, right, ..

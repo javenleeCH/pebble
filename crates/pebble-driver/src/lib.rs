@@ -45,7 +45,11 @@ pub fn cmd_build(
             return Err(CompileFailure(1));
         }
     };
-    let filename = src.file_name().and_then(|f| f.to_str()).unwrap_or("pipeline.pebble").to_string();
+    let filename = src
+        .file_name()
+        .and_then(|f| f.to_str())
+        .unwrap_or("pipeline.pebble")
+        .to_string();
 
     // 1. parse
     let mut diags = pebble_diagnostic::DiagBag::new();
@@ -107,11 +111,10 @@ pub fn cmd_build(
                     (format!("table:{}", locator), Some(locator.clone()))
                 }
                 pebble_hir::SourceKind::MemoryTable { name, .. } => {
-                    let df = lock_of(kind)
-                        .and_then(|l| match &l.source {
-                            LockSource::MemoryTable { data_file, .. } => data_file.clone(),
-                            _ => None,
-                        });
+                    let df = lock_of(kind).and_then(|l| match &l.source {
+                        LockSource::MemoryTable { data_file, .. } => data_file.clone(),
+                        _ => None,
+                    });
                     (format!("memory:{}", name), df)
                 }
             };
@@ -178,7 +181,11 @@ pub fn cmd_build(
             CompileFailure(1)
         })
     };
-    write("canonical.hir", &pebble_semantics::canonical_bytes(&hir), "canonical HIR")?;
+    write(
+        "canonical.hir",
+        &pebble_semantics::canonical_bytes(&hir),
+        "canonical HIR",
+    )?;
     write("plan.sql", canonical_sql.as_bytes(), "canonical SQL")?;
     write(
         "manifest.json",
@@ -228,10 +235,9 @@ pub struct RunOutcome {
 /// `pebble run <build_dir> [--duckdb <path>]`
 pub fn cmd_run(build_dir: &Path, duckdb: Option<&Path>) -> Result<RunOutcome, String> {
     let manifest: ExecutionManifest = load_json(&build_dir.join("manifest.json"))?;
-    let plan_sql = std::fs::read_to_string(&build_dir.join("plan.sql"))
+    let plan_sql = std::fs::read_to_string(build_dir.join("plan.sql"))
         .map_err(|e| format!("读取 plan.sql 失败: {}", e))?;
-    let validations: Vec<serde_json::Value> =
-        load_json(&build_dir.join("validations.json"))?;
+    let validations: Vec<serde_json::Value> = load_json(&build_dir.join("validations.json"))?;
 
     let manifest_hash = format!("sha256:{}", manifest.compute_hash());
     let artifact = BackendArtifact::DuckDbSql {
@@ -276,7 +282,10 @@ pub fn cmd_run(build_dir: &Path, duckdb: Option<&Path>) -> Result<RunOutcome, St
                 &manifest_hash,
                 &actual_artifact_hash,
                 RunCode::IoFailure,
-                &format!("数据集 {} 无 CLI 数据定位（宿主注册内存表），无法在 CLI 执行", ds.identity),
+                &format!(
+                    "数据集 {} 无 CLI 数据定位（宿主注册内存表），无法在 CLI 执行",
+                    ds.identity
+                ),
             );
             return write_receipt(build_dir, receipt, false, None);
         } else {
@@ -378,7 +387,11 @@ pub fn cmd_run(build_dir: &Path, duckdb: Option<&Path>) -> Result<RunOutcome, St
             Some(format!(
                 "write → {} {}",
                 path,
-                if written { "(已写出)" } else { "(未发现输出文件！)" }
+                if written {
+                    "(已写出)"
+                } else {
+                    "(未发现输出文件！)"
+                }
             ))
         }
         (ExecutionStatus::Ok, _) => output.as_ref().map(|csv| {
@@ -472,14 +485,22 @@ fn resolve_duckdb(explicit: Option<&Path>) -> Option<PathBuf> {
     // PATH
     if let Ok(path_var) = std::env::var("PATH") {
         for dir in std::env::split_paths(&path_var) {
-            let exe = dir.join(if cfg!(windows) { "duckdb.exe" } else { "duckdb" });
+            let exe = dir.join(if cfg!(windows) {
+                "duckdb.exe"
+            } else {
+                "duckdb"
+            });
             if exe.exists() {
                 return Some(exe);
             }
         }
     }
     // tools/
-    let local = PathBuf::from("tools").join(if cfg!(windows) { "duckdb.exe" } else { "duckdb" });
+    let local = PathBuf::from("tools").join(if cfg!(windows) {
+        "duckdb.exe"
+    } else {
+        "duckdb"
+    });
     if local.exists() {
         return Some(local);
     }
@@ -527,7 +548,8 @@ fn write_receipt(
 }
 
 fn load_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T, String> {
-    let text = std::fs::read_to_string(path).map_err(|e| format!("读取 {} 失败: {}", path.display(), e))?;
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| format!("读取 {} 失败: {}", path.display(), e))?;
     serde_json::from_str(&text).map_err(|e| format!("解析 {} 失败: {}", path.display(), e))
 }
 
@@ -535,10 +557,8 @@ fn load_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T, String> {
 
 /// `pebble verify <manifest.json> <receipt.json>`；Ok(()) = APPROVED。
 pub fn cmd_verify(manifest_path: &Path, receipt_path: &Path) -> Result<(), Vec<String>> {
-    let manifest: ExecutionManifest = load_json(manifest_path)
-        .map_err(|e| vec![e])?;
-    let receipt: ExecutionReceipt = load_json(receipt_path)
-        .map_err(|e| vec![e])?;
+    let manifest: ExecutionManifest = load_json(manifest_path).map_err(|e| vec![e])?;
+    let receipt: ExecutionReceipt = load_json(receipt_path).map_err(|e| vec![e])?;
     pebble_hir::manifest::verify(&manifest, &receipt)
 }
 
@@ -548,7 +568,10 @@ pub fn cmd_verify(manifest_path: &Path, receipt_path: &Path) -> Result<(), Vec<S
 /// 字段格式：`name:type` 或 `name:type?`（可选）。
 pub fn cmd_lock(args: &[String], out: &Path) -> Result<(), String> {
     if args.len() < 2 {
-        return Err("用法: pebble lock <table|memory> <locator|name> [--data-file f] name:type[?]...".into());
+        return Err(
+            "用法: pebble lock <table|memory> <locator|name> [--data-file f] name:type[?]..."
+                .into(),
+        );
     }
     let kind = args[0].as_str();
     let rest = &args[1..];

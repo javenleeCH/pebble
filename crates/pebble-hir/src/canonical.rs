@@ -9,7 +9,7 @@
 //! - 格式与语义均版本化；语义版本进入哈希。
 
 use crate::{
-    AggFunc, BuiltinFn, BinOp, Hash, Hir, HirNode, Literal, SourceKind, TerminalKind,
+    AggFunc, BinOp, BuiltinFn, Hash, Hir, HirNode, Literal, SourceKind, TerminalKind,
     TransformKind, Type, UnaryOp,
 };
 
@@ -21,11 +21,7 @@ pub fn canonical_bytes(hir: &Hir) -> Vec<u8> {
     w.u32(hir.root);
     for node in &hir.nodes {
         match node {
-            HirNode::Source {
-                base,
-                source,
-                kind,
-            } => {
+            HirNode::Source { base, source, kind } => {
                 w.tag(b"S");
                 w.u32(*source);
                 match kind {

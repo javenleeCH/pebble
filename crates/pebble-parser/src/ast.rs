@@ -160,22 +160,17 @@ impl AggFunc {
 
 #[derive(Clone, Debug)]
 pub enum TerminalOp {
-    Write {
-        path: String,
-        span: Span,
-    },
-    Collect {
-        span: Span,
-    },
-    Print {
-        span: Span,
-    },
+    Write { path: String, span: Span },
+    Collect { span: Span },
+    Print { span: Span },
 }
 
 impl TerminalOp {
     pub fn span(&self) -> Span {
         match self {
-            TerminalOp::Write { span, .. } | TerminalOp::Collect { span } | TerminalOp::Print { span } => *span,
+            TerminalOp::Write { span, .. }
+            | TerminalOp::Collect { span }
+            | TerminalOp::Print { span } => *span,
         }
     }
 }

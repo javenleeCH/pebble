@@ -1,0 +1,135 @@
+name: Release
+
+# 发布门禁（参考 uniEtract）：tag v* 触发；多目标构建、版本一致性校验、
+# 打包 + SHA256SUMS、GitHub Release（fail_on_unmatched_files）。
+# 版本一致性：tag 必须等于 workspace 版本（Cargo.toml [workspace.package].version）。
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to publish, e.g. v0.1.0"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+
+jobs:
+  version-check:
+    name: Tag ↔ workspace version consistency
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compare tag with Cargo.toml
+        run: |
+          WS_VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          echo "workspace version: $WS_VERSION, tag: $RELEASE_TAG"
+          if [ "v$WS_VERSION" != "$RELEASE_TAG" ]; then
+            echo "::error::tag $RELEASE_TAG 与 workspace 版本 $WS_VERSION 不一致"
+            exit 1
+          fi
+
+  build:
+    name: Package ${{ matrix.target }}
+    needs: version-check
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            exe: pebble
+            format: tar.gz
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            exe: pebble.exe
+            format: zip
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            exe: pebble
+            format: tar.gz
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.85.0
+        with:
+          targets: ${{ matrix.target }}
+      - name: Build ${{ matrix.target }}
+        run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: Smoke binary
+        shell: bash
+        run: '"target/${{ matrix.target }}/release/${{ matrix.exe }}" --version'
+      - name: Stage package
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          EXE: ${{ matrix.exe }}
+          FORMAT: ${{ matrix.format }}
+        run: |
+          set -e
+          VERSION="${RELEASE_TAG#v}"
+          STAGE="pebble-$VERSION-$TARGET"
+          mkdir -p "dist/$STAGE" dist/release
+          cp "target/$TARGET/release/$EXE" "dist/$STAGE/"
+          cp README.md rationale.md "dist/$STAGE/"
+          # 运行期依赖说明：DuckDB CLI 不随包分发
+          cat > "dist/$STAGE/RUNTIME-DEPS.md" <<'EOF'
+          # 运行期依赖
+          - `pebble run` 需要 DuckDB CLI（1.4+）：PATH 或 `tools/duckdb(.exe)`。
+            下载：https://duckdb.org/docs/install/ 或
+            https://github.com/duckdb/duckdb/releases
+          - 缺失 DuckDB 时 build/verify 仍可用；端到端执行会得到 RUN-003 回执。
+          EOF
+          if [ "$FORMAT" = "tar.gz" ]; then
+            tar -czf "dist/release/pebble-$VERSION-$TARGET.tar.gz" -C dist "$STAGE"
+          else
+            pwsh -NoProfile -Command "Compress-Archive -Path 'dist/$STAGE' -DestinationPath 'dist/release/pebble-$VERSION-$TARGET.zip' -Force"
+          fi
+          ls -la dist/release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: packages-${{ matrix.target }}
+          path: dist/release/*
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: packages-*
+          path: dist/release
+          merge-multiple: true
+      - name: Generate SHA256SUMS
+        run: |
+          cd dist/release
+          sha256sum pebble-* > SHA256SUMS
+          cat SHA256SUMS
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: pebble ${{ env.RELEASE_TAG }}
+          body: |
+            ## pebble ${{ env.RELEASE_TAG }}
+
+            可信数据变换 DSL——M0 证据链（build / run / verify / lock）。
+
+            ### 校验
+            下载后请核对 `SHA256SUMS`：`sha256sum -c SHA256SUMS --ignore-missing`
+
+            ### 运行期依赖
+            `pebble run` 需要 DuckDB CLI（1.4+），见包内 `RUNTIME-DEPS.md`。
+          fail_on_unmatched_files: true
+          files: |
+            dist/release/*

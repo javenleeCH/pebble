@@ -1,5 +1,7 @@
 # Pebble
 
+[![CI](https://github.com/javenleeCH/pebble/actions/workflows/ci.yml/badge.svg)](https://github.com/javenleeCH/pebble/actions/workflows/ci.yml)
+
 面向离线批结构化数据的**可信变换 DSL 与嵌入式编译器 SDK**：唯一静态语义、Schema 快照、规范化 HIR、DuckDB SQL 执行工件和运行回执组成可核对的证据链。
 
 > **M0 最小可验证核已跑通**（`cargo test` 全绿，端到端在 DuckDB 1.4.x 验证）：build → run → verify 四幕证据链，

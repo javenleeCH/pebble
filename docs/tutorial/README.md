@@ -26,6 +26,7 @@
 | [第 5 章](ch05-HIR与哈希.md) | HIR：字段身份、canonical 序列化与内容寻址 | `pebble-hir/src/{lib,canonical,lock}.rs` | `3bccd59` |
 | [第 6 章](ch06-DuckDB语义守卫.md) | 后端 codegen：不继承 SQL 默认行为 | `pebble-duckdb/src/lib.rs` | `3bccd59` |
 | [第 7 章](ch07-证据链.md) | 落地：build/run/verify 证据链闭环 | `pebble-driver/src/*` | `3bccd59` |
+| [附录 A](appendix-ci-发布门禁.md) | CI 与发布门禁：把纪律变成机器 | `.github/workflows/*`、`docs_gate.rs` | 见 git log |
 
 > M0 的实现以单个大提交 `3bccd59` 收口（教训：教程驱动应当「每章一 commit」，从 v0.1.1 起严格执行）。
 

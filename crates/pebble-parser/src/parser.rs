@@ -69,10 +69,7 @@ impl<'a> Parser<'a> {
             true
         } else {
             let got = describe(self.peek());
-            self.err_here(
-                Code::ParUnexpected,
-                format!("期望 {}，遇到 {}", what, got),
-            );
+            self.err_here(Code::ParUnexpected, format!("期望 {}，遇到 {}", what, got));
             false
         }
     }
@@ -98,15 +95,12 @@ impl<'a> Parser<'a> {
     }
 
     fn accept_kw(&mut self, kw: &str) -> bool {
-        if let Tok::Ident(name) = self.peek() {
-            if name == kw {
-                self.advance();
-                return true;
-            }
+        if matches!(self.peek(), Tok::Ident(n) if n == kw) {
+            self.advance();
+            return true;
         }
         false
     }
-
     // ---------- program / pipeline ----------
 
     fn parse_program(&mut self) -> Program {
@@ -285,10 +279,7 @@ impl<'a> Parser<'a> {
                         return None;
                     }
                 };
-                TerminalOp::Write {
-                    path,
-                    span: start,
-                }
+                TerminalOp::Write { path, span: start }
             }
             "collect" => TerminalOp::Collect { span: start },
             "print" => TerminalOp::Print { span: start },
@@ -306,10 +297,7 @@ impl<'a> Parser<'a> {
         let op = match name {
             "filter" => {
                 let pred = self.parse_expr()?;
-                Op::Filter {
-                    pred,
-                    span: start,
-                }
+                Op::Filter { pred, span: start }
             }
             "extend" => {
                 // PAR-003：参数必须是记录字面量
@@ -349,11 +337,7 @@ impl<'a> Parser<'a> {
                         return None;
                     }
                     let span = item_start.merge(self.toks[self.pos.saturating_sub(1)].span);
-                    items.push(SelectItem {
-                        expr,
-                        alias,
-                        span,
-                    });
+                    items.push(SelectItem { expr, alias, span });
                     if self.accept_punct(&Tok::Comma) {
                         continue;
                     }
@@ -364,10 +348,7 @@ impl<'a> Parser<'a> {
                     return None;
                 }
                 self.accept_punct(&Tok::Comma);
-                Op::Select {
-                    items,
-                    span: start,
-                }
+                Op::Select { items, span: start }
             }
             "distinct" => Op::Distinct { span: start },
             "sort" => {
@@ -379,11 +360,10 @@ impl<'a> Parser<'a> {
                     let key_start = self.peek_span();
                     let expr = self.parse_expr()?;
                     let mut descending = false;
-                    if let Tok::Ident(dir) = self.peek().clone() {
-                        if dir == "asc" || dir == "desc" {
-                            self.advance();
-                            descending = dir == "desc";
-                        }
+                    if matches!(self.peek(), Tok::Ident(dir) if dir == "asc" || dir == "desc") {
+                        let is_desc = matches!(self.peek(), Tok::Ident(dir) if dir == "desc");
+                        self.advance();
+                        descending = is_desc;
                     }
                     let span = key_start.merge(self.toks[self.pos.saturating_sub(1)].span);
                     keys.push(SortKey {
@@ -401,10 +381,7 @@ impl<'a> Parser<'a> {
                     return None;
                 }
                 self.accept_punct(&Tok::Comma);
-                Op::Sort {
-                    keys,
-                    span: start,
-                }
+                Op::Sort { keys, span: start }
             }
             "take" => {
                 let n = match self.peek().clone() {
@@ -429,16 +406,16 @@ impl<'a> Parser<'a> {
                         return None;
                     }
                 };
-                Op::Take {
-                    n,
-                    span: start,
-                }
+                Op::Take { n, span: start }
             }
             "join" => {
                 let right = self.parse_source();
                 if !self.accept_punct(&Tok::Comma) {
                     let got = describe(self.peek());
-                    self.err_here(Code::ParUnexpected, format!("join 需要 `,` 分隔右表与 on 条件，遇到 {}", got));
+                    self.err_here(
+                        Code::ParUnexpected,
+                        format!("join 需要 `,` 分隔右表与 on 条件，遇到 {}", got),
+                    );
                     return None;
                 }
                 // on = expr；缺 `=` 报 PAR-007
@@ -446,7 +423,10 @@ impl<'a> Parser<'a> {
                 if on_kw != "on" {
                     self.diags.error(
                         Code::ParJoinOnMalformed,
-                        format!("join 的第二个参数必须是固定绑定 `on = expr`，遇到 `{}`", on_kw),
+                        format!(
+                            "join 的第二个参数必须是固定绑定 `on = expr`，遇到 `{}`",
+                            on_kw
+                        ),
                         self.toks[self.pos.saturating_sub(1)].span,
                     );
                     return None;
@@ -480,11 +460,7 @@ impl<'a> Parser<'a> {
                         alias = self.expect_ident("分组键输出名");
                     }
                     let span = key_start.merge(self.toks[self.pos.saturating_sub(1)].span);
-                    keys.push(GroupKey {
-                        expr,
-                        alias,
-                        span,
-                    });
+                    keys.push(GroupKey { expr, alias, span });
                     if self.accept_punct(&Tok::Comma) {
                         continue;
                     }
@@ -495,10 +471,7 @@ impl<'a> Parser<'a> {
                     return None;
                 }
                 self.accept_punct(&Tok::Comma);
-                Op::GroupBy {
-                    keys,
-                    span: start,
-                }
+                Op::GroupBy { keys, span: start }
             }
             "agg" => {
                 let mut bindings = Vec::new();
@@ -518,11 +491,7 @@ impl<'a> Parser<'a> {
                     }
                     let call = self.parse_agg_call()?;
                     let span = b_start.merge(self.toks[self.pos.saturating_sub(1)].span);
-                    bindings.push(AggBinding {
-                        name,
-                        call,
-                        span,
-                    });
+                    bindings.push(AggBinding { name, call, span });
                     if self.accept_punct(&Tok::Comma) {
                         continue;
                     }
@@ -570,7 +539,10 @@ impl<'a> Parser<'a> {
         if !AGG_FNS.contains(&fn_name.as_str()) {
             self.diags.error(
                 Code::ParAggNotAggCall,
-                format!("agg 绑定右侧必须是聚合调用（count/sum/min/max/avg），遇到 `{}`", fn_name),
+                format!(
+                    "agg 绑定右侧必须是聚合调用（count/sum/min/max/avg），遇到 `{}`",
+                    fn_name
+                ),
                 start,
             );
             return None;
@@ -620,11 +592,7 @@ impl<'a> Parser<'a> {
             }
             let value = self.parse_expr()?;
             let span = b_start.merge(self.toks[self.pos.saturating_sub(1)].span);
-            bindings.push(Binding {
-                name,
-                value,
-                span,
-            });
+            bindings.push(Binding { name, value, span });
             if self.accept_punct(&Tok::Comma) {
                 continue;
             }
@@ -796,7 +764,9 @@ impl<'a> Parser<'a> {
                     };
                 }
                 other => {
-                    let span = other.span().merge(self.toks[self.pos.saturating_sub(1)].span);
+                    let span = other
+                        .span()
+                        .merge(self.toks[self.pos.saturating_sub(1)].span);
                     self.diags.error(
                         Code::ParUnexpected,
                         "`.` 只支持 `别名.字段` 两级引用".to_string(),
@@ -831,7 +801,7 @@ impl<'a> Parser<'a> {
                 if !v.is_finite() {
                     self.diags.error(
                         Code::SemLiteralOutOfRange,
-                        format!("浮点字面量超出 MVP 有限 f64 值域"),
+                        "浮点字面量超出 MVP 有限 f64 值域",
                         span,
                     );
                     return None;

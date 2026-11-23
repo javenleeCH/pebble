@@ -12,7 +12,7 @@
 //! 本后端不证明外部引擎物理计划等于 HIR；DuckDB 属执行信任基。
 
 use pebble_hir::{
-    BackendArtifact, BuiltinFn, BinOp, Hir, HirNode, Literal, SchemaLock, SourceKind, THirExpr,
+    BackendArtifact, BinOp, BuiltinFn, Hir, HirNode, Literal, SchemaLock, SourceKind, THirExpr,
     TransformKind, Type, UnaryOp,
 };
 use std::collections::BTreeSet;
@@ -59,12 +59,7 @@ pub fn f64_validation_queries(
     let cg = Codegen { hir, lock_of };
     let mut out = Vec::new();
     for node in &hir.nodes {
-        if let HirNode::Source {
-            base,
-            source,
-            kind,
-        } = node
-        {
+        if let HirNode::Source { base, source, kind } = node {
             let scan = cg.emit_scan(base.id, *source, kind)?;
             for f in &base.output.fields {
                 if matches!(f.ty.base(), Type::F64) {
@@ -107,11 +102,7 @@ impl<'a> Codegen<'a> {
 
     fn emit_node(&self, id: pebble_hir::NodeId) -> Result<String, String> {
         match &self.hir.nodes[id as usize] {
-            HirNode::Source {
-                base,
-                source,
-                kind,
-            } => self.emit_scan(base.id, *source, kind),
+            HirNode::Source { base, source, kind } => self.emit_scan(base.id, *source, kind),
             HirNode::Transform { base, kind } => self.emit_transform(base, kind),
             HirNode::Aggregate {
                 base,
@@ -179,10 +170,17 @@ impl<'a> Codegen<'a> {
                 spec
             )
         };
-        Ok(format!("SELECT {} FROM {} AS \"t{}\"", col_list, from, source))
+        Ok(format!(
+            "SELECT {} FROM {} AS \"t{}\"",
+            col_list, from, source
+        ))
     }
 
-    fn emit_transform(&self, base: &pebble_hir::NodeBase, kind: &TransformKind) -> Result<String, String> {
+    fn emit_transform(
+        &self,
+        base: &pebble_hir::NodeBase,
+        kind: &TransformKind,
+    ) -> Result<String, String> {
         let inner = self.emit_node(base.inputs[0])?;
         let passthrough = |ids: &BTreeSet<pebble_hir::FieldId>| -> String {
             base.output
@@ -211,11 +209,7 @@ impl<'a> Codegen<'a> {
                     if input_ids.contains(&f.id) {
                         select_list.push(format!("\"f{}\"", f.id));
                     } else if let Some(b) = bindings.iter().find(|b| b.output == f.id) {
-                        select_list.push(format!(
-                            "{} AS \"f{}\"",
-                            self.emit_expr(&b.value),
-                            f.id
-                        ));
+                        select_list.push(format!("{} AS \"f{}\"", self.emit_expr(&b.value), f.id));
                     } else {
                         return Err(format!("extend 输出字段 f{} 无来源", f.id));
                     }
@@ -366,10 +360,7 @@ impl<'a> Codegen<'a> {
                     format!("MAX({})", x)
                 };
                 match call.arg.as_ref().unwrap().ty().base() {
-                    Type::F64 => format!(
-                        "CASE WHEN ({m}) = 0 THEN 0.0 ELSE ({m}) END",
-                        m = m
-                    ),
+                    Type::F64 => format!("CASE WHEN ({m}) = 0 THEN 0.0 ELSE ({m}) END", m = m),
                     _ => m,
                 }
             }
@@ -400,7 +391,11 @@ impl<'a> Codegen<'a> {
         for f in &schema.fields {
             select_list.push(format!("\"f{}\" AS {}", f.id, sql_ident(&f.name)));
         }
-        format!("SELECT {} FROM ({}) AS \"final\"", select_list.join(", "), inner)
+        format!(
+            "SELECT {} FROM ({}) AS \"final\"",
+            select_list.join(", "),
+            inner
+        )
     }
 
     // ---------- 表达式 ----------
@@ -441,8 +436,16 @@ impl<'a> Codegen<'a> {
     fn emit_binary(&self, op: BinOp, left: &THirExpr, right: &THirExpr, _ty: &Type) -> String {
         use BinOp::*;
         match op {
-            And => format!("(({}) AND ({}))", self.emit_expr(left), self.emit_expr(right)),
-            Or => format!("(({}) OR ({}))", self.emit_expr(left), self.emit_expr(right)),
+            And => format!(
+                "(({}) AND ({}))",
+                self.emit_expr(left),
+                self.emit_expr(right)
+            ),
+            Or => format!(
+                "(({}) OR ({}))",
+                self.emit_expr(left),
+                self.emit_expr(right)
+            ),
             Eq | Neq | Gt | Lt | Gte | Lte => {
                 let o = match op {
                     Eq => "=",
@@ -453,14 +456,23 @@ impl<'a> Codegen<'a> {
                     Lte => "<=",
                     _ => unreachable!(),
                 };
-                format!("(({}) {} ({}))", self.emit_expr(left), o, self.emit_expr(right))
+                format!(
+                    "(({}) {} ({}))",
+                    self.emit_expr(left),
+                    o,
+                    self.emit_expr(right)
+                )
             }
             Add | Sub | Mul | Div | Mod => {
                 let lb = left.ty().base();
                 let rb = right.ty().base();
                 if matches!(lb, Type::Str) && matches!(rb, Type::Str) {
                     // 字符串拼接（严格传播 null）
-                    return format!("(({}) || ({}))", self.emit_expr(left), self.emit_expr(right));
+                    return format!(
+                        "(({}) || ({}))",
+                        self.emit_expr(left),
+                        self.emit_expr(right)
+                    );
                 }
                 if matches!(lb, Type::I64) && matches!(rb, Type::I64) {
                     self.emit_int_arith(op, &self.emit_expr(left), &self.emit_expr(right))
@@ -526,10 +538,7 @@ impl<'a> Codegen<'a> {
             Div => norm_f64(&format!("(({}) / ({}))", l, r)),
             Mod => {
                 // fmod：x - y*trunc(x/y)；除零 → NULL；非有限 → NULL；零规范化
-                let raw = format!(
-                    "(({}) - (({}) * trunc((({}) / ({})))))",
-                    l, r, l, r
-                );
+                let raw = format!("(({}) - (({}) * trunc((({}) / ({})))))", l, r, l, r);
                 let normed = norm_f64(&raw);
                 format!(
                     "CASE WHEN ({}) IS NULL THEN NULL WHEN ({}) = 0 THEN NULL ELSE {} END",
@@ -561,7 +570,7 @@ impl<'a> Codegen<'a> {
                         "CASE WHEN ({x}) IS NULL THEN NULL WHEN ({x}) = {I64_MIN} THEN NULL ELSE -({x}) END",
                         x = x
                     ),
-                    _ => format!("(({}) + 0.0)", format!("-({})", x)),
+                    _ => format!("((-({x})) + 0.0)", x = x),
                 }
             }
         }
@@ -596,10 +605,7 @@ impl<'a> Codegen<'a> {
             Lower => format!("lower(({}))", self.emit_expr(&args[0])),
             Upper => format!("upper(({}))", self.emit_expr(&args[0])),
             Trim => format!("trim(({}))", self.emit_expr(&args[0])),
-            Length => format!(
-                "CAST(length(({})) AS BIGINT)",
-                self.emit_expr(&args[0])
-            ),
+            Length => format!("CAST(length(({})) AS BIGINT)", self.emit_expr(&args[0])),
             Contains => format!(
                 "contains(({}), ({}))",
                 self.emit_expr(&args[0]),
@@ -656,8 +662,8 @@ fn sql_ident(name: &str) -> String {
 mod tests {
     use super::*;
     use pebble_hir::{
-        AggBindingH, AggCallH, AggFunc, FieldOrigin, FieldSchema, Hir, LockField, LockSource,
-        LockType, SchemaLock, SEMANTICS_VERSION,
+        AggBindingH, AggCallH, AggFunc, FieldOrigin, Hir, LockField, LockSource, LockType,
+        SchemaLock,
     };
 
     fn lock_for(kind: &SourceKind) -> Option<SchemaLock> {
@@ -667,9 +673,21 @@ mod tests {
                     locator: locator.clone(),
                 },
                 vec![
-                    LockField { name: "status".into(), ty: LockType::Str, optional: false },
-                    LockField { name: "amount".into(), ty: LockType::I64, optional: true },
-                    LockField { name: "customer_id".into(), ty: LockType::Str, optional: false },
+                    LockField {
+                        name: "status".into(),
+                        ty: LockType::Str,
+                        optional: false,
+                    },
+                    LockField {
+                        name: "amount".into(),
+                        ty: LockType::I64,
+                        optional: true,
+                    },
+                    LockField {
+                        name: "customer_id".into(),
+                        ty: LockType::Str,
+                        optional: false,
+                    },
                 ],
             )),
             SourceKind::MemoryTable { .. } => None,
@@ -693,11 +711,13 @@ Table("orders.csv") as o
 "#;
         let mut diags = pebble_diagnostic::DiagBag::new();
         let program = pebble_parser::parse(src, &mut diags).expect("parse");
-        let catalog = pebble_semantics::Catalog::from_locks(vec![lock_for(&SourceKind::Table {
-            locator: "orders.csv".into(),
-            schema_lock_hash: pebble_hir::Hash([0u8; 32]),
-        })
-        .expect("lock")]);
+        let catalog = pebble_semantics::Catalog::from_locks(vec![
+            lock_for(&SourceKind::Table {
+                locator: "orders.csv".into(),
+                schema_lock_hash: pebble_hir::Hash([0u8; 32]),
+            })
+            .expect("lock"),
+        ]);
         pebble_semantics::compile(&program, &catalog, &mut diags).expect("lower")
     }
 
@@ -707,9 +727,15 @@ Table("orders.csv") as o
         let artifact = compile_sql(&hir, &lock_for).expect("codegen");
         let BackendArtifact::DuckDbSql { canonical_sql } = artifact;
         // 前言：确定性引擎配置
-        assert!(canonical_sql.starts_with("-- pebble-duckdb artifact v1 (canonical)\nSET threads TO 1;"));
+        assert!(
+            canonical_sql
+                .starts_with("-- pebble-duckdb artifact v1 (canonical)\nSET threads TO 1;")
+        );
         // 判空 → IS NULL / IS NOT NULL（经语义层 is_null lowering）
-        assert!(canonical_sql.contains("IS NOT NULL"), "判空必须生成 IS NOT NULL");
+        assert!(
+            canonical_sql.contains("IS NOT NULL"),
+            "判空必须生成 IS NOT NULL"
+        );
         // sort nulls last
         assert!(canonical_sql.contains("NULLS LAST"));
         // sum 的 checked 守卫
@@ -736,11 +762,7 @@ Table("orders.csv") as o
             "CAST(0 AS BIGINT)",
         );
         assert!(sql.contains("= 0 THEN NULL"));
-        let sql2 = cg.emit_int_arith(
-            pebble_hir::BinOp::Add,
-            "\"f1\"",
-            "\"f2\"",
-        );
+        let sql2 = cg.emit_int_arith(pebble_hir::BinOp::Add, "\"f1\"", "\"f2\"");
         assert!(sql2.contains("HUGEINT"));
         assert!(sql2.contains("IS NULL THEN NULL"));
     }

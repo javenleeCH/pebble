@@ -106,8 +106,7 @@ impl ExecutionManifest {
     /// manifest 主体的规范字节（不含 manifest_hash 自身）。
     fn canonical_bytes(&self) -> Vec<u8> {
         // serde 结构体字段顺序稳定；BTree 确保集合顺序稳定。
-        let json = serde_json::to_vec(self).expect("manifest 序列化");
-        json
+        serde_json::to_vec(self).expect("manifest 序列化")
     }
 
     pub fn compute_hash(&self) -> Hash {
@@ -152,10 +151,7 @@ pub struct InputValidation {
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum ExecutionStatus {
     Ok,
-    Failed {
-        code: RunCode,
-        message: String,
-    },
+    Failed { code: RunCode, message: String },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

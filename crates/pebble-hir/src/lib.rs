@@ -340,9 +340,7 @@ pub enum SourceKind {
 }
 
 pub enum TerminalKind {
-    Write {
-        path: String,
-    },
+    Write { path: String },
     Collect,
     Print,
 }
@@ -499,13 +497,20 @@ impl Hir {
     /// 人类可读的调试转储（诊断用途；非 canonical）。
     pub fn dump(&self) -> String {
         let mut out = String::new();
-        out.push_str(&format!("HIR (root={}, semantics={})\n", self.root, self.semantics_version));
+        out.push_str(&format!(
+            "HIR (root={}, semantics={})\n",
+            self.root, self.semantics_version
+        ));
         for node in &self.nodes {
             let base = node.base();
             let kind = match node {
                 HirNode::Source { source, kind, .. } => match kind {
-                    SourceKind::Table { locator, .. } => format!("Source#{} Table({})", source, locator),
-                    SourceKind::MemoryTable { name, .. } => format!("Source#{} MemoryTable({})", source, name),
+                    SourceKind::Table { locator, .. } => {
+                        format!("Source#{} Table({})", source, locator)
+                    }
+                    SourceKind::MemoryTable { name, .. } => {
+                        format!("Source#{} MemoryTable({})", source, name)
+                    }
                 },
                 HirNode::Transform { kind, .. } => match kind {
                     TransformKind::Filter { .. } => "Filter".to_string(),

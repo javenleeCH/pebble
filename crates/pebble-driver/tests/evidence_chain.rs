@@ -103,7 +103,11 @@ fn verify_binds_receipt_to_manifest_and_detects_tamper() {
     let mut tampered = receipt.clone();
     tampered.submitted_artifact_hash = "sha256:tampered".into();
     let tampered_path = out.join("receipt-tampered.json");
-    std::fs::write(&tampered_path, serde_json::to_vec_pretty(&tampered).unwrap()).unwrap();
+    std::fs::write(
+        &tampered_path,
+        serde_json::to_vec_pretty(&tampered).unwrap(),
+    )
+    .unwrap();
     assert!(cmd_verify(&out.join("manifest.json"), &tampered_path).is_err());
 
     // 篡改 manifest 本体 → 与 receipt 绑定断裂
@@ -122,10 +126,9 @@ fn run_without_duckdb_writes_failed_receipt() {
     let missing = out.join("no-such-duckdb.exe");
     let outcome = cmd_run(&out, Some(&missing)).expect("run 返回 outcome 而非 panic");
     assert!(!outcome.ok);
-    let receipt: pebble_hir::ExecutionReceipt = serde_json::from_str(
-        &std::fs::read_to_string(out.join("receipt.json")).expect("receipt"),
-    )
-    .unwrap();
+    let receipt: pebble_hir::ExecutionReceipt =
+        serde_json::from_str(&std::fs::read_to_string(out.join("receipt.json")).expect("receipt"))
+            .unwrap();
     match receipt.status {
         pebble_hir::ExecutionStatus::Failed { code, message } => {
             assert_eq!(code.as_str(), "RUN-003", "message: {}", message);
@@ -139,7 +142,11 @@ fn run_without_duckdb_writes_failed_receipt() {
 fn duckdb_available() -> bool {
     if let Ok(path_var) = std::env::var("PATH") {
         for dir in std::env::split_paths(&path_var) {
-            let exe = dir.join(if cfg!(windows) { "duckdb.exe" } else { "duckdb" });
+            let exe = dir.join(if cfg!(windows) {
+                "duckdb.exe"
+            } else {
+                "duckdb"
+            });
             if exe.exists() {
                 return true;
             }
@@ -159,13 +166,28 @@ fn end_to_end_demo_when_duckdb_present() {
     let out = out_dir("e2e");
     cmd_build(&example("00_m0_revenue.pebble"), &locks_dir(), &out, None).expect("build");
     let outcome = cmd_run(&out, None).expect("run");
-    assert!(outcome.ok, "端到端执行必须成功: {:?}", outcome.output_summary);
+    assert!(
+        outcome.ok,
+        "端到端执行必须成功: {:?}",
+        outcome.output_summary
+    );
     let summary_text = outcome.output_summary.clone().expect("collect 输出摘要");
     // 预期：c2 = 9000+3000 = 12000（2 单），c6 = 11000（1 单）；
     // c3 只有 open、c5 只有 refund 被过滤；c2 的 null amount 行被过滤；c1 收入 450 < 10000
-    assert!(summary_text.contains("c2,2,12000"), "实际输出:\n{}", summary_text);
-    assert!(summary_text.contains("c6,1,11000"), "实际输出:\n{}", summary_text);
-    assert!(!summary_text.contains("c1"), "c1 的收入 450 < 10000，不得出现");
+    assert!(
+        summary_text.contains("c2,2,12000"),
+        "实际输出:\n{}",
+        summary_text
+    );
+    assert!(
+        summary_text.contains("c6,1,11000"),
+        "实际输出:\n{}",
+        summary_text
+    );
+    assert!(
+        !summary_text.contains("c1"),
+        "c1 的收入 450 < 10000，不得出现"
+    );
     assert!(!summary_text.contains("c3"), "c3 只有 open 订单，不得出现");
 
     // verify：APPROVED PLAN == EXECUTED PLAN
@@ -191,11 +213,31 @@ fn toctou_data_tamper_fails_run002_when_duckdb_present() {
             locator: data_path.clone(),
         },
         vec![
-            pebble_hir::LockField { name: "order_id".into(), ty: pebble_hir::LockType::I64, optional: false },
-            pebble_hir::LockField { name: "status".into(), ty: pebble_hir::LockType::Str, optional: false },
-            pebble_hir::LockField { name: "amount".into(), ty: pebble_hir::LockType::I64, optional: true },
-            pebble_hir::LockField { name: "score".into(), ty: pebble_hir::LockType::F64, optional: false },
-            pebble_hir::LockField { name: "customer_id".into(), ty: pebble_hir::LockType::Str, optional: false },
+            pebble_hir::LockField {
+                name: "order_id".into(),
+                ty: pebble_hir::LockType::I64,
+                optional: false,
+            },
+            pebble_hir::LockField {
+                name: "status".into(),
+                ty: pebble_hir::LockType::Str,
+                optional: false,
+            },
+            pebble_hir::LockField {
+                name: "amount".into(),
+                ty: pebble_hir::LockType::I64,
+                optional: true,
+            },
+            pebble_hir::LockField {
+                name: "score".into(),
+                ty: pebble_hir::LockType::F64,
+                optional: false,
+            },
+            pebble_hir::LockField {
+                name: "customer_id".into(),
+                ty: pebble_hir::LockType::Str,
+                optional: false,
+            },
         ],
     );
     std::fs::write(tmp.join("orders_t.lock.json"), lock.to_json()).unwrap();
@@ -220,10 +262,8 @@ fn toctou_data_tamper_fails_run002_when_duckdb_present() {
     std::fs::write(&data, rows).unwrap();
     let second = cmd_run(&out, None).expect("run 2");
     assert!(!second.ok, "数据被篡改后必须失败");
-    let receipt: pebble_hir::ExecutionReceipt = serde_json::from_str(
-        &std::fs::read_to_string(out.join("receipt.json")).unwrap(),
-    )
-    .unwrap();
+    let receipt: pebble_hir::ExecutionReceipt =
+        serde_json::from_str(&std::fs::read_to_string(out.join("receipt.json")).unwrap()).unwrap();
     match receipt.status {
         pebble_hir::ExecutionStatus::Failed { code, message } => {
             assert_eq!(code.as_str(), "RUN-002", "message: {}", message);
@@ -250,8 +290,16 @@ fn nonfinite_f64_input_fails_run001_when_duckdb_present() {
             locator: data_path.clone(),
         },
         vec![
-            pebble_hir::LockField { name: "id".into(), ty: pebble_hir::LockType::I64, optional: false },
-            pebble_hir::LockField { name: "score".into(), ty: pebble_hir::LockType::F64, optional: false },
+            pebble_hir::LockField {
+                name: "id".into(),
+                ty: pebble_hir::LockType::I64,
+                optional: false,
+            },
+            pebble_hir::LockField {
+                name: "score".into(),
+                ty: pebble_hir::LockType::F64,
+                optional: false,
+            },
         ],
     );
     std::fs::write(tmp.join("scores.lock.json"), lock.to_json()).unwrap();
@@ -265,10 +313,8 @@ fn nonfinite_f64_input_fails_run001_when_duckdb_present() {
     cmd_build(&src, &tmp, &out, None).expect("build");
     let result = cmd_run(&out, None).expect("run");
     assert!(!result.ok, "非有限 f64 输入必须失败（RUN-001）");
-    let receipt: pebble_hir::ExecutionReceipt = serde_json::from_str(
-        &std::fs::read_to_string(out.join("receipt.json")).unwrap(),
-    )
-    .unwrap();
+    let receipt: pebble_hir::ExecutionReceipt =
+        serde_json::from_str(&std::fs::read_to_string(out.join("receipt.json")).unwrap()).unwrap();
     match receipt.status {
         pebble_hir::ExecutionStatus::Failed { code, .. } => {
             assert_eq!(code.as_str(), "RUN-001", "应为 RUN-001");

@@ -16,8 +16,8 @@ pub enum Tok {
     RBrace,
     Comma,
     Dot,
-    Eq,      // ==
-    Assign,  // =
+    Eq,     // ==
+    Assign, // =
     Colon,
     Neq,
     Gt,
@@ -108,7 +108,10 @@ pub fn lex(source: &str, diags: &mut DiagBag) -> Vec<Token> {
                     // `1.` 形式
                     diags.error(
                         Code::LexBadNumber,
-                        format!("数字字面量 `{}` 后的小数点缺少数字", bytes[start..i + 1].iter().collect::<String>()),
+                        format!(
+                            "数字字面量 `{}` 后的小数点缺少数字",
+                            bytes[start..i + 1].iter().collect::<String>()
+                        ),
                         span!(start, i + 1),
                     );
                     i += 1;
@@ -189,7 +192,11 @@ pub fn lex(source: &str, diags: &mut DiagBag) -> Vec<Token> {
                 }
             }
             if !closed {
-                diags.error(Code::LexUnclosedString, "字符串未闭合（行尾未遇到结束引号）", span!(start, i));
+                diags.error(
+                    Code::LexUnclosedString,
+                    "字符串未闭合（行尾未遇到结束引号）",
+                    span!(start, i),
+                );
             } else {
                 out.push(Token {
                     tok: Tok::Str(value),

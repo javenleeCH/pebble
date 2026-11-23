@@ -224,7 +224,12 @@ pub fn render(source: &str, filename: &str, d: &Diagnostic) -> String {
         out.push_str(&format!("  ┌─ {}:{}:{}\n", filename, line_no, col_no));
         out.push_str("  │\n");
         out.push_str(&format!("{} │ {}\n", line_no, line_text));
-        out.push_str(&format!("  │ {}{} {}\n", " ".repeat(col_no.saturating_sub(1)), carets, d.code.as_str()));
+        out.push_str(&format!(
+            "  │ {}{} {}\n",
+            " ".repeat(col_no.saturating_sub(1)),
+            carets,
+            d.code.as_str()
+        ));
         out.push_str("  │\n");
     } else {
         out.push_str("  ┌─ (无源码位置)\n");
@@ -266,8 +271,12 @@ mod tests {
     fn render_locates_line_and_caret() {
         let src = "Table(\"a.csv\")\n  .filter(u.age >= 18)\n";
         // 第 2 行 "  .filter(u.age >= 18)"：u.age 从第 13 列开始，占 3 个字符
-        let d = Diagnostic::error(Code::SemUnknownField, "字段 `agge` 不存在于当前解析域", Span::new(27, 30))
-            .with_hint("当前可用字段: age, name");
+        let d = Diagnostic::error(
+            Code::SemUnknownField,
+            "字段 `agge` 不存在于当前解析域",
+            Span::new(27, 30),
+        )
+        .with_hint("当前可用字段: age, name");
         let text = render(src, "demo.pebble", &d);
         assert!(text.contains("SEM-001"));
         assert!(text.contains("demo.pebble:2:13"));

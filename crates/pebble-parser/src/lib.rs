@@ -13,7 +13,7 @@ pub use parser::parse;
 #[cfg(test)]
 mod tests {
     use crate::parser::parse;
-    use pebble_diagnostic::{render, DiagBag};
+    use pebble_diagnostic::{DiagBag, render};
 
     fn expect_err(src: &str, code: &str) {
         let mut diags = DiagBag::new();
@@ -23,7 +23,11 @@ mod tests {
             diags.diags.iter().any(|d| d.code.as_str() == code),
             "expected {}, got {:?} for: {}",
             code,
-            diags.diags.iter().map(|d| d.code.as_str()).collect::<Vec<_>>(),
+            diags
+                .diags
+                .iter()
+                .map(|d| d.code.as_str())
+                .collect::<Vec<_>>(),
             src
         );
     }

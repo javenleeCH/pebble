@@ -2,6 +2,7 @@
 name = "pebble-duckdb"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 
 [dependencies]
 pebble-hir = { path = "../pebble-hir" }

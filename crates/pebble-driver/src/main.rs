@@ -71,7 +71,10 @@ fn main() {
                     println!("  hir_hash       = {}", s.hir_hash);
                     println!("  artifact_hash  = {}", s.artifact_hash);
                     println!("  manifest_hash  = {}", s.manifest_hash);
-                    println!("  审计视图        = {}", s.out_dir.join("plan.algebra.tex").display());
+                    println!(
+                        "  审计视图        = {}",
+                        s.out_dir.join("plan.algebra.tex").display()
+                    );
                     0
                 }
                 Err(pebble_driver::CompileFailure(c)) => c as i32,
@@ -98,21 +101,19 @@ fn main() {
                 }
             }
         }
-        Cmd::Verify { manifest, receipt } => {
-            match pebble_driver::cmd_verify(&manifest, &receipt) {
-                Ok(()) => {
-                    println!("APPROVED PLAN == EXECUTED PLAN");
-                    0
-                }
-                Err(problems) => {
-                    for p in &problems {
-                        eprintln!("[verify] {}", p);
-                    }
-                    println!("VERIFY FAILED");
-                    4
-                }
+        Cmd::Verify { manifest, receipt } => match pebble_driver::cmd_verify(&manifest, &receipt) {
+            Ok(()) => {
+                println!("APPROVED PLAN == EXECUTED PLAN");
+                0
             }
-        }
+            Err(problems) => {
+                for p in &problems {
+                    eprintln!("[verify] {}", p);
+                }
+                println!("VERIFY FAILED");
+                4
+            }
+        },
         Cmd::Lock { out, args } => match pebble_driver::cmd_lock(&args, &out) {
             Ok(()) => {
                 println!("lock 写出: {}", out.display());

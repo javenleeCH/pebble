@@ -13,6 +13,9 @@ members = [
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
+# MSRV 同时是 CI 基线（.github/workflows/ci.yml）与 clippy 的 msrv 配置：
+# clippy 据此不会建议需要更新 Rust 的写法（如 1.88 的 let-chain）。
+rust-version = "1.85"
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
