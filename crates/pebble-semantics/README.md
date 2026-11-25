@@ -4,4 +4,4 @@
 
 编译只信任 Schema lock/宿主注册的不可变 Schema，运行时元数据仅用于一致性验证。语义结果 lowering 为 typed canonical HIR，不得由 DuckDB、Polars 或未来原生后端自行补齐语言规则。
 
-状态：目录骨架，暂不写实现。类型与推导规则草稿见 `docs/draft/spec/05-type-system.md`。
+状态：已实现（M0）。类型与推导规则见 `docs/draft/spec/05-type-system.md`；教程见 `docs/tutorial/ch04-类型与语义.md`。

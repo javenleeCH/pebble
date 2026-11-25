@@ -4,4 +4,4 @@
 
 路线：M0/M1 只启用 DuckDB SQL 执行适配器；架构保留 Polars 与 M4 Cranelift/MLIR 原生后端扩展点，不在 MVP 同时实现或宣称跨后端等价。
 
-状态：目录骨架，暂不写实现。M0/M1 不自建 Physical Plan、Arrow 全栈或 storage。
+状态：已实现（M0：`build` / `run` / `verify` / `lock` 与证据链）。M0/M1 不自建 Physical Plan、Arrow 全栈或 storage；教程见 `docs/tutorial/ch07-证据链.md`。

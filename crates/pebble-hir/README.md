@@ -4,4 +4,4 @@
 
 同时负责规范拓扑编号、canonical HIR 序列化与版本化内容 hash。Span、注释和 HashMap 顺序不得进入摘要。
 
-状态：目录骨架，暂不写实现。结构及 BackendArtifact/Manifest/Receipt 边界见 `docs/draft/design/hir.md`。
+状态：已实现（M0）。结构及 BackendArtifact/Manifest/Receipt 边界见 `docs/draft/design/hir.md`；教程见 `docs/tutorial/ch05-HIR与哈希.md`。
