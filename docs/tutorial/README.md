@@ -26,17 +26,20 @@
 | [第 5 章](ch05-HIR与哈希.md) | HIR：字段身份、canonical 序列化与内容寻址 | `pebble-hir/src/{lib,canonical,lock}.rs` | `3bccd59` |
 | [第 6 章](ch06-DuckDB语义守卫.md) | 后端 codegen：不继承 SQL 默认行为 | `pebble-duckdb/src/lib.rs` | `3bccd59` |
 | [第 7 章](ch07-证据链.md) | 落地：build/run/verify 证据链闭环 | `pebble-driver/src/*` | `3bccd59` |
+| [第 8 章](ch08-解析器错误恢复.md) | 解析器错误恢复：同步点、级联错误、阶段门控 | `pebble-parser/src/{lexer,parser}.rs`、`pebble-diagnostic/src/lib.rs` | 见 git log |
 | [附录 A](appendix-ci-发布门禁.md) | CI 与发布门禁：把纪律变成机器 | `.github/workflows/*`、`docs_gate.rs` | 见 git log |
 
-> M0 的实现以单个大提交 `3bccd59` 收口（教训：教程驱动应当「每章一 commit」，从 v0.1.1 起严格执行）。
+> M0 的实现以单个大提交 `3bccd59` 收口（教训：教程驱动应当「每章一 commit」）。从第 8 章起严格执行：一章一个 commit，读者 checkout 到该章的提交就能复现本章内容。
 
 ## 后续章节规划（实现一章、写一章）
 
-- 第 8 章：解析器错误恢复（多错误一次报告，补齐 08-diagnostics §8.6）
-- 第 9 章：`having` 与受限 `cast`（v0.1.1）
-- 第 10 章：M2 证据签名与独立 verifier
-- 第 11 章：M3 Polars 第二后端与语义差集测试
-- 第 12 章：M4 Cranelift 原生后端初探（表达式 JIT）
+- 第 9 章：语义层错误恢复——毒化类型，让坏消息静默传播（补齐 08-diagnostics §8.6 第 3 条）
+- 第 10 章：`having` 与受限 `cast`（v0.1.1）
+- 第 11 章：M2 证据签名与独立 verifier
+- 第 12 章：M3 Polars 第二后端与语义差集测试
+- 第 13 章：M4 Cranelift 原生后端初探（表达式 JIT）
+
+> 路线调整（2026-11-25）：原计划第 8 章「补齐 §8.6」。实现时发现语义阶段的多错误报告依赖一项独立的技术（毒化类型），一堂课讲一个核心想法对新手更好，故单列为第 9 章，其后章节顺延一位。
 
 ## 阅读环境
 

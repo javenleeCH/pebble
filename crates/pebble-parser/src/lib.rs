@@ -8,7 +8,7 @@ pub mod lexer;
 pub mod parser;
 
 pub use ast::*;
-pub use parser::parse;
+pub use parser::{PartialAst, parse};
 
 #[cfg(test)]
 mod tests {
@@ -18,7 +18,7 @@ mod tests {
     fn expect_err(src: &str, code: &str) {
         let mut diags = DiagBag::new();
         let result = parse(src, &mut diags);
-        assert!(result.is_none(), "expected failure for: {}", src);
+        assert!(result.is_err(), "expected failure for: {}", src);
         assert!(
             diags.diags.iter().any(|d| d.code.as_str() == code),
             "expected {}, got {:?} for: {}",
@@ -50,7 +50,7 @@ MemoryTable("orders") as o
 "#;
         let mut diags = DiagBag::new();
         let program = parse(src, &mut diags);
-        assert!(program.is_some(), "diags: {:?}", diags.diags);
+        assert!(program.is_ok(), "diags: {:?}", diags.diags);
         let p = program.unwrap();
         assert_eq!(p.pipeline.ops.len(), 7);
         assert!(matches!(
@@ -75,7 +75,7 @@ Table("scores.parquet") as s
 "#;
         let mut diags = DiagBag::new();
         let program = parse(src, &mut diags);
-        assert!(program.is_some(), "diags: {:?}", diags.diags);
+        assert!(program.is_ok(), "diags: {:?}", diags.diags);
     }
 
     #[test]
@@ -147,7 +147,7 @@ Table("scores.parquet") as s
         // LEX 错误应被渲染为带行号/提示的文本
         let src = "Table(\"a.csv\")\n  .filter(u.a ^ 2 > 1)\n  .collect()\n";
         let mut diags = DiagBag::new();
-        assert!(parse(src, &mut diags).is_none());
+        assert!(parse(src, &mut diags).is_err());
         let text = render(src, "demo.pebble", &diags.diags[0]);
         assert!(text.contains("LEX-001"));
         assert!(text.contains("幂运算"));

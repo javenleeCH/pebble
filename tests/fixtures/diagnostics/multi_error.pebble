@@ -1,0 +1,11 @@
+// 第 8 章演示：一次编译，把所有错误都报出来
+// （这个文件是故意写错的：1 个词法错误 + 2 个语法错误，请勿「修复」）
+Table("tests/data/orders.csv") as o
+  .filter(o.status == "paid" & o.amount != null)
+  //                              ↑ 逻辑与写成了单个 &
+  .extend({
+    is_big = o.amount > 100
+  //                        ↑ 这一行忘了写 )
+  .select(o.customer_id, o.amount + )
+  //                               ↑ 加号后面少了操作数
+  .collect()

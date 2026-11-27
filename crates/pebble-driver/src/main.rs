@@ -77,7 +77,11 @@ fn main() {
                     );
                     0
                 }
-                Err(pebble_driver::CompileFailure(c)) => c as i32,
+                Err(f) => {
+                    // 编译诊断（可能不止一条）或环境消息：原样写到 stderr
+                    eprint!("{}", f.report);
+                    f.code as i32
+                }
             }
         }
         Cmd::Run { build_dir, duckdb } => {

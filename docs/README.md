@@ -16,6 +16,7 @@
 | 5 | HIR：字段身份、canonical 序列化与内容寻址 | [`tutorial/ch05-HIR与哈希.md`](tutorial/ch05-HIR与哈希.md) |
 | 6 | 后端 codegen：不继承 DuckDB 默认行为 | [`tutorial/ch06-DuckDB语义守卫.md`](tutorial/ch06-DuckDB语义守卫.md) |
 | 7 | 落地：build/run/verify 证据链闭环 | [`tutorial/ch07-证据链.md`](tutorial/ch07-证据链.md) |
+| 8 | 解析器错误恢复：同步点、级联错误、阶段门控；Span 单位 bug 修复 | [`tutorial/ch08-解析器错误恢复.md`](tutorial/ch08-解析器错误恢复.md) |
 
 课程地图与开发纪律见 [`tutorial/README.md`](tutorial/README.md)。
 

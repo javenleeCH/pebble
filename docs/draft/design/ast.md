@@ -213,5 +213,5 @@ AST 中的字段仍只是 `alias + name` 语法引用。lowering 必须依据当
 
 1. AST 保留源码顺序和 `Span`，不做类型标注或 Schema 推导。
 2. `Expr::Call` 仅表示内置标量函数；聚合调用只由 `AggBinding` 中的 `AggCall` 表示。
-3. 解析错误恢复可使用显式错误占位节点，但含未恢复错误的程序不得 lowering 或生成执行工件。
+3. 解析错误恢复丢弃无法完整解析的算子（也可使用显式错误占位节点）；含未恢复错误的程序以 `PartialAst` 交还，不得 lowering 或生成执行工件。解析入口返回 `Result<Program, PartialAst>`，语义层只接受 `Program`。
 4. AST 不直接交给任何后端；所有 DuckDB、Polars、LaTeX 和未来原生后端统一消费 typed HIR。

@@ -1,5 +1,12 @@
 //! 词法分析：UTF-8、`//` 行注释、双引号字符串、i64/f64 字面量。
 //! `|`（Lambda 已废除）与 `^`（不存在幂运算）是非法字符，给出针对性提示。
+//!
+//! 错误恢复（第 8 章；08-diagnostics §8.6 第 1 条）：
+//! - 词法错误**就地恢复**，一次扫描报出全部 LEX 错误；只有无法确定 token 边界的
+//!   未闭合字符串才退到下一行行首继续。
+//! - 能救回值的就救回值（坏转义的字符串、`1.` 的整数部分、`.5` 的小数部分），
+//!   让 token 流的结构保持完整；救不回的留一个 `Tok::Error`「洞」占位。
+//! - Span 一律记录 UTF-8 **字节偏移**。
 
 use pebble_diagnostic::{Code, DiagBag, Span};
 
@@ -10,6 +17,9 @@ pub enum Tok {
     Int(i128),
     Float(f64),
     Str(String),
+    /// 词法层留下的「洞」：这里有一个无法识别的 token，词法层**已经报过错**。
+    /// 它占住位置，使 token 流的结构不变；解析器遇到它绝不重复报错（第 8 章）。
+    Error,
     LParen,
     RParen,
     LBrace,
@@ -44,14 +54,16 @@ pub struct Token {
 pub fn lex(source: &str, diags: &mut DiagBag) -> Vec<Token> {
     let mut out = Vec::new();
     let bytes: Vec<char> = source.chars().collect();
-    // 字节偏移 → 字符索引映射：直接以字符索引记录，Span 语义按“字符偏移”处理
-    //（诊断渲染同样按 char 计数，二者一致）。
+    // 字符下标 → 字节偏移。扫描按字符走（简单直观），但 Span 必须写成字节偏移：
+    // 渲染层用 `&source[start..end]` 切片，而 Rust 字符串是按字节索引的。
+    let mut byte_at: Vec<usize> = source.char_indices().map(|(b, _)| b).collect();
+    byte_at.push(source.len());
     let n = bytes.len();
     let mut i = 0usize;
 
     macro_rules! span {
         ($s:expr, $e:expr) => {
-            Span::new($s, $e)
+            Span::new(byte_at[$s], byte_at[$e])
         };
     }
 
@@ -74,6 +86,12 @@ pub fn lex(source: &str, diags: &mut DiagBag) -> Vec<Token> {
             continue;
         }
         let start = i;
+        // UTF-8 BOM：Windows 上的编辑器常在文件开头加一个。它不是程序的一部分，跳过即可。
+        // （不能从 `source` 里削掉——Span 必须相对原始源码计数）
+        if c == '\u{feff}' && i == 0 {
+            i += 1;
+            continue;
+        }
         // 标识符：MVP 仅 ASCII（02-lexical）
         if c.is_ascii_alphabetic() || c == '_' {
             i += 1;
@@ -89,59 +107,86 @@ pub fn lex(source: &str, diags: &mut DiagBag) -> Vec<Token> {
         }
         // 数字
         if c.is_ascii_digit() {
-            while i < n && bytes[i].is_ascii_digit() {
-                i += 1;
-            }
+            scan_digits(&bytes, &mut i);
+            let digits_end = i;
+            let text: String = bytes[start..digits_end].iter().collect();
+            let value = text.parse::<i128>();
             if i < n && bytes[i] == '.' {
                 if i + 1 < n && bytes[i + 1].is_ascii_digit() {
+                    // 浮点：整数部分 `.` 小数部分
                     i += 1;
-                    while i < n && bytes[i].is_ascii_digit() {
-                        i += 1;
-                    }
+                    scan_digits(&bytes, &mut i);
                     let text: String = bytes[start..i].iter().collect();
                     let value: f64 = text.parse().unwrap_or(f64::INFINITY);
                     out.push(Token {
                         tok: Tok::Float(value),
                         span: span!(start, i),
                     });
-                } else {
-                    // `1.` 形式
+                } else if let Ok(v) = value {
+                    // `1.` 形式：LEX-004。救回整数部分（`1.` 当作 `1`），token 流不留洞
                     diags.error(
                         Code::LexBadNumber,
-                        format!(
-                            "数字字面量 `{}` 后的小数点缺少数字",
-                            bytes[start..i + 1].iter().collect::<String>()
-                        ),
+                        format!("数字字面量 `{}.` 后的小数点缺少数字", v),
                         span!(start, i + 1),
                     );
                     i += 1;
+                    out.push(Token {
+                        tok: Tok::Int(v),
+                        span: span!(start, digits_end),
+                    });
+                } else {
+                    // 整数部分本身已溢出：按「过大」报告
+                    diags.error(
+                        Code::LexBadNumber,
+                        format!("数字字面量 `{}` 过大，无法解析", text),
+                        span!(start, digits_end),
+                    );
+                    out.push(Token {
+                        tok: Tok::Error,
+                        span: span!(start, digits_end),
+                    });
                 }
             } else {
-                let text: String = bytes[start..i].iter().collect();
-                match text.parse::<i128>() {
+                match value {
                     Ok(v) => out.push(Token {
                         tok: Tok::Int(v),
-                        span: span!(start, i),
+                        span: span!(start, digits_end),
                     }),
                     Err(_) => {
+                        // 连 i128 都放不下：没有值可以救，留一个洞
                         diags.error(
                             Code::LexBadNumber,
                             format!("数字字面量 `{}` 过大，无法解析", text),
-                            span!(start, i),
+                            span!(start, digits_end),
                         );
+                        out.push(Token {
+                            tok: Tok::Error,
+                            span: span!(start, digits_end),
+                        });
                     }
                 }
             }
             continue;
         }
-        // `.` 开头且后跟数字 → `.5` 形式非法
+        // `.` 开头且后跟数字 → `.5` 形式非法（LEX-004）。
+        // 只越过这个 `.`：数字部分在下一轮照常识别成整数，token 流不留洞。
         if c == '.' && i + 1 < n && bytes[i + 1].is_ascii_digit() {
+            i += 1;
+            let digits_end = i + digits_len(&bytes, i);
+            let text: String = bytes[start..digits_end].iter().collect();
             diags.error(
                 Code::LexBadNumber,
-                format!("数字字面量 `.{}…` 缺少整数部分", bytes[i + 1]),
-                span!(start, i + 2),
+                format!("数字字面量 `{text}` 缺少整数部分"),
+                span!(start, digits_end),
             );
-            i += 2;
+            if text[1..].parse::<i128>().is_err() {
+                // 小数部分本身已经放不进 i128：没有值可以救。一个根因只报一次，整段留一个洞
+                i = digits_end;
+                out.push(Token {
+                    tok: Tok::Error,
+                    span: span!(start, digits_end),
+                });
+            }
             continue;
         }
         // 字符串
@@ -160,7 +205,7 @@ pub fn lex(source: &str, diags: &mut DiagBag) -> Vec<Token> {
                     break;
                 }
                 if ch == '\\' {
-                    if i + 1 < n {
+                    if i + 1 < n && bytes[i + 1] != '\n' {
                         let esc = bytes[i + 1];
                         let replacement = match esc {
                             '"' => Some('"'),
@@ -175,6 +220,7 @@ pub fn lex(source: &str, diags: &mut DiagBag) -> Vec<Token> {
                                 i += 2;
                             }
                             None => {
+                                // LEX-003：丢掉这个转义，字符串本身保留
                                 diags.error(
                                     Code::LexBadEscape,
                                     format!("非法转义序列 `\\{}`", esc),
@@ -184,6 +230,10 @@ pub fn lex(source: &str, diags: &mut DiagBag) -> Vec<Token> {
                             }
                         }
                     } else {
+                        // 反斜杠在文件结尾或行尾：字符串没闭合，按 LEX-002 报告。
+                        // 把反斜杠一并算进这个字符串，免得它再被当成一个独立的非法字符。
+                        // 也不把换行当转义字符——那会往消息里塞进一个真正的换行
+                        i += 1;
                         break;
                     }
                 } else {
@@ -192,11 +242,17 @@ pub fn lex(source: &str, diags: &mut DiagBag) -> Vec<Token> {
                 }
             }
             if !closed {
+                // LEX-002：字符串到行尾都没闭合。留一个洞占住它的位置，
+                // 扫描从下一行行首继续（`i` 正停在换行符上，下一轮按空白跳过）。
                 diags.error(
                     Code::LexUnclosedString,
                     "字符串未闭合（行尾未遇到结束引号）",
                     span!(start, i),
                 );
+                out.push(Token {
+                    tok: Tok::Error,
+                    span: span!(start, i),
+                });
             } else {
                 out.push(Token {
                     tok: Tok::Str(value),
@@ -251,23 +307,44 @@ pub fn lex(source: &str, diags: &mut DiagBag) -> Vec<Token> {
             i += 1;
             continue;
         }
-        // 非法字符（含已废除的 `|`、不存在的 `^`）
+        // 非法字符（含已废除的 `|`、不存在的 `^`）：LEX-001，留一个洞
         let hint = if c == '|' {
             Some("Lambda `|param|` 已废除：使用裸字段或 `别名.字段` 引用".to_string())
         } else if c == '^' {
             Some("Pebble 不存在幂运算符 `^`".to_string())
+        } else if c == '&' {
+            Some("逻辑与写作 `&&`（两个 `&`）".to_string())
+        } else if c == ';' {
+            Some("Pebble 的流水线靠 `.` 连接，不需要分号".to_string())
+        } else if let Some(h) = full_width_hint(c) {
+            Some(h.to_string())
+        } else if c.is_whitespace() {
+            Some(
+                "Pebble 只把普通空格、制表符和换行当作空白：请检查是否输入了全角或不换行空格"
+                    .to_string(),
+            )
         } else {
             None
         };
+        // 控制字符与各种「隐形空白」在终端里看不见：报它的码点，而不是往消息里塞一个隐形的东西
+        let shown = if c.is_control() || c.is_whitespace() {
+            format!("U+{:04X}", c as u32)
+        } else {
+            format!("`{c}`")
+        };
         let mut d = pebble_diagnostic::Diagnostic::error(
             Code::LexIllegalChar,
-            format!("非法字符 `{}`", c),
+            format!("非法字符 {shown}"),
             span!(start, i + 1),
         );
         if let Some(h) = hint {
             d = d.with_hint(h);
         }
         diags.push(d);
+        out.push(Token {
+            tok: Tok::Error,
+            span: span!(start, i + 1),
+        });
         i += 1;
     }
     out.push(Token {
@@ -275,4 +352,38 @@ pub fn lex(source: &str, diags: &mut DiagBag) -> Vec<Token> {
         span: span!(n, n),
     });
     out
+}
+
+/// 常见的全角标点 → 改用半角的提示。
+///
+/// 中文输入法下这些笔误相当常见，而全角与半角在等宽字体里只差一点点，肉眼几乎发现不了。
+fn full_width_hint(c: char) -> Option<&'static str> {
+    Some(match c {
+        '（' | '）' => "这是全角括号：请改用半角 `(` 和 `)`",
+        '，' => "这是全角逗号：请改用半角 `,`",
+        '：' => "这是全角冒号：Pebble 的参数绑定写作 `名字 = 表达式`，不用冒号",
+        '“' | '”' | '‘' | '’' => "这是中文引号：字符串字面量请用半角双引号 `\"`",
+        '！' => "这是全角感叹号：逻辑非写作半角 `!`",
+        '＋' | '－' | '＊' | '／' | '％' | '＝' | '＞' | '＜' => {
+            "这是全角运算符：请改用半角符号"
+        }
+        '．' => "这是全角句点：算子之间用半角 `.` 连接",
+        _ => return None,
+    })
+}
+
+/// 从 `i` 起吞掉连续数字，返回新的下标。
+fn scan_digits(bytes: &[char], i: &mut usize) {
+    while *i < bytes.len() && bytes[*i].is_ascii_digit() {
+        *i += 1;
+    }
+}
+
+/// 从 `i` 起的连续数字个数。
+fn digits_len(bytes: &[char], i: usize) -> usize {
+    let mut end = i;
+    while end < bytes.len() && bytes[end].is_ascii_digit() {
+        end += 1;
+    }
+    end - i
 }

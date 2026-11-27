@@ -7,6 +7,9 @@
 > **M0 最小可验证核已跑通**（`cargo test` 全绿，端到端在 DuckDB 1.4.x 验证）：build → run → verify 四幕证据链，
 > 语义变更使旧审批失效、注释变更不影响哈希、数据篡改（TOCTOU）与非有限 f64 输入均被拒绝。
 > 运行 `cargo run -p pebble-driver -- build examples/00_m0_revenue.pebble --locks tests/locks` 开始。
+>
+> **第 8 章（解析器错误恢复）已完成**：一次编译报出全部词法/语法错误（按源码位置排序，末尾附汇总行），
+> 并修复了中文注释导致的诊断定位漂移/崩溃。试试 [tests/fixtures/diagnostics/multi_error.pebble](tests/fixtures/diagnostics/multi_error.pebble)，教程见 [`docs/tutorial/ch08-解析器错误恢复.md`](docs/tutorial/ch08-解析器错误恢复.md)。
 
 ## 文档导航
 

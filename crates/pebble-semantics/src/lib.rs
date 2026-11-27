@@ -1830,7 +1830,7 @@ mod tests {
     fn compile_err(src: &str, code: &str) -> DiagBag {
         let mut diags = DiagBag::new();
         let catalog = test_catalog();
-        if let Some(program) = pebble_parser::parse(src, &mut diags) {
+        if let Ok(program) = pebble_parser::parse(src, &mut diags) {
             assert!(compile(&program, &catalog, &mut diags).is_none());
         }
         assert!(
@@ -2094,5 +2094,28 @@ MemoryTable("orders") as o
         let changed = M0.replace(">= 10000", ">= 9999");
         let b = compile_ok(&changed);
         assert_ne!(hir_hash(&a), hir_hash(&b));
+    }
+
+    #[test]
+    fn non_ascii_comments_change_spans_but_not_the_hash() {
+        // Span 改用 UTF-8 字节偏移后（第 8 章），中文注释会改变其后所有 Span 的数值。
+        // Span 只服务诊断、不进入 canonical 序列化——所以哈希必须纹丝不动。
+        let a = compile_ok(M0);
+        let commented = format!("// 审批要点：每个汉字占 3 字节\n// 第二行中文注释\n{M0}");
+        let b = compile_ok(&commented);
+        assert_eq!(hir_hash(&a), hir_hash(&b));
+    }
+
+    #[test]
+    fn semantic_error_is_located_after_chinese_comments() {
+        let src = "// 审批要点\nMemoryTable(\"orders\") as o\n  .filter(o.statusx == \"paid\")\n  .collect()\n";
+        let diags = compile_err(src, "SEM-001");
+        let text = pebble_diagnostic::render(src, "demo.pebble", &diags.diags[0]);
+        // 第 3 行第 11 列：整个字段引用 `o.statusx`（9 个字符）的起点
+        assert!(text.contains("demo.pebble:3:11"), "{text}");
+        assert!(
+            text.contains(&format!("{} SEM-001", "^".repeat(9))),
+            "{text}"
+        );
     }
 }

@@ -275,6 +275,7 @@ receipt 记录 manifest hash、实际提交 SQL hash、引擎版本、输入校�
 - `pebble-duckdb`：canonical SQL（threads=1）、IS NOT NULL、HUGEINT checked 守卫、f64 isfinite/+0.0 规范化、round ties-to-even、NULLS LAST、group/distinct 值同一性。
 - `pebble-latex`：最小单向 σ/ε/π/γ/τ/topN 审计视图。
 - `pebble-driver`：`build` / `run` / `verify` / `lock` 四个子命令与四幕验收（含 TOCTOU 数据哈希、RUN-001 f64 预检、RUN-003 工件缺失）。
+- `pebble-parser` + `pebble-diagnostic`（第 8 章）：解析器错误恢复——同步点 + 括号栈，多错误一次报告且一个根因只报一次（残骸模式下试探解析，恢复本身不制造诊断）；词法错误占位 token；`parse() -> Result<Program, PartialAst>` 以类型执行「带伤的 AST 不进语义层」；提示只说与所遇 token 相容的话；表达式嵌套（64 层）与原子数（256 个）上限，避免栈溢出；诊断按源码位置排序并附汇总行（行号二分查找，最多显示 100 条）；Span 统一为 UTF-8 字节偏移（修复中文注释导致的定位漂移/崩溃）。
 
 四幕验收结果：重复编译三哈希一致；语义变更（10000→9999）旧审批失效；注释变更哈希不变；数据篡改（RUN-002）与非有限输入（RUN-001）均被拒绝；SEM-011 歧义诊断带候选提示。
 

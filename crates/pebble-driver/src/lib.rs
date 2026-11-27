@@ -23,9 +23,35 @@ pub struct BuildSummary {
     pub manifest_hash: String,
 }
 
-/// 编译失败：诊断已打印到 stderr；u16 为建议退出码。
+/// 编译/构建失败。
+///
+/// - `report`：应当原样写到 stderr 的全部文本（编译诊断的渲染，或 `[pebble]` 开头的环境消息）；
+/// - `code`：进程退出码。1 = 环境问题（文件、lock、IO），2 = 编译期诊断。
+///
+/// 库函数不直接打印，而是把报告作为**数据**返回：这样「用户到底看到了什么」才能被测试断言。
 #[derive(Debug)]
-pub struct CompileFailure(pub u16);
+pub struct CompileFailure {
+    pub code: u16,
+    pub report: String,
+}
+
+impl CompileFailure {
+    /// 环境问题（读取失败、lock 目录缺失……）：单行 `[pebble] …` 消息。
+    fn env(code: u16, message: impl std::fmt::Display) -> Self {
+        CompileFailure {
+            code,
+            report: fail_msg(&message.to_string()),
+        }
+    }
+
+    /// 编译期诊断：渲染**全部**诊断（按源码位置排序，末尾附汇总行）。
+    fn diagnostics(source: &str, filename: &str, diags: &pebble_diagnostic::DiagBag) -> Self {
+        CompileFailure {
+            code: 2,
+            report: pebble_diagnostic::render_all(source, filename, diags),
+        }
+    }
+}
 
 fn fail_msg(msg: &str) -> String {
     format!("[pebble] {}", msg)
@@ -40,10 +66,7 @@ pub fn cmd_build(
 ) -> Result<BuildSummary, CompileFailure> {
     let source = match std::fs::read_to_string(src) {
         Ok(s) => s,
-        Err(e) => {
-            eprintln!("{}", fail_msg(&format!("读取源文件失败: {}", e)));
-            return Err(CompileFailure(1));
-        }
+        Err(e) => return Err(CompileFailure::env(1, format!("读取源文件失败: {}", e))),
     };
     let filename = src
         .file_name()
@@ -51,36 +74,24 @@ pub fn cmd_build(
         .unwrap_or("pipeline.pebble")
         .to_string();
 
-    // 1. parse
+    // 1. parse。Err(部分 AST) 表示解析阶段发生过恢复：
+    //    带伤的树不进入语义层（08-diagnostics §8.6 第 4 条），诊断已经全部收集完毕。
     let mut diags = pebble_diagnostic::DiagBag::new();
     let program = match pebble_parser::parse(&source, &mut diags) {
-        Some(p) => p,
-        None => {
-            for d in &diags.diags {
-                eprintln!("{}", pebble_diagnostic::render(&source, &filename, d));
-            }
-            return Err(CompileFailure(2));
-        }
+        Ok(p) => p,
+        Err(_partial) => return Err(CompileFailure::diagnostics(&source, &filename, &diags)),
     };
 
     // 2. catalog
     let catalog = match pebble_semantics::Catalog::load_dir(locks_dir) {
         Ok(c) => c,
-        Err(e) => {
-            eprintln!("{}", fail_msg(&e));
-            return Err(CompileFailure(1));
-        }
+        Err(e) => return Err(CompileFailure::env(1, e)),
     };
 
-    // 3. semantics → HIR
+    // 3. semantics → HIR。任一 Error 存在时不产出 HIR，更不会走到下面的 codegen。
     let hir = match pebble_semantics::compile(&program, &catalog, &mut diags) {
         Some(h) => h,
-        None => {
-            for d in &diags.diags {
-                eprintln!("{}", pebble_diagnostic::render(&source, &filename, d));
-            }
-            return Err(CompileFailure(2));
-        }
+        None => return Err(CompileFailure::diagnostics(&source, &filename, &diags)),
     };
     let hir_hash = pebble_semantics::hir_hash(&hir);
 
@@ -95,8 +106,10 @@ pub fn cmd_build(
     let artifact = match pebble_duckdb::compile_sql(&hir, &lock_of) {
         Ok(a) => a,
         Err(e) => {
-            eprintln!("{}", fail_msg(&format!("DuckDB codegen 失败: {}", e)));
-            return Err(CompileFailure(1));
+            return Err(CompileFailure::env(
+                1,
+                format!("DuckDB codegen 失败: {}", e),
+            ));
         }
     };
     let artifact_hash = artifact.artifact_hash();
@@ -135,10 +148,7 @@ pub fn cmd_build(
 
     // 6. RUN-001 预检查询（build 时生成，run 时执行）
     let validations = pebble_duckdb::f64_validation_queries(&hir, &lock_of)
-        .map_err(|e| {
-            eprintln!("{}", fail_msg(&e));
-            CompileFailure(1)
-        })?
+        .map_err(|e| CompileFailure::env(1, e))?
         .into_iter()
         .map(|(subject, sql)| serde_json::json!({"subject": subject, "sql": sql}))
         .collect::<Vec<_>>();
@@ -171,15 +181,11 @@ pub fn cmd_build(
 
     // 8. 写出工件
     let BackendArtifact::DuckDbSql { canonical_sql } = &artifact;
-    std::fs::create_dir_all(out_dir).map_err(|e| {
-        eprintln!("{}", fail_msg(&format!("创建输出目录失败: {}", e)));
-        CompileFailure(1)
-    })?;
+    std::fs::create_dir_all(out_dir)
+        .map_err(|e| CompileFailure::env(1, format!("创建输出目录失败: {}", e)))?;
     let write = |name: &str, bytes: &[u8], note: &str| {
-        std::fs::write(out_dir.join(name), bytes).map_err(|e| {
-            eprintln!("{}", fail_msg(&format!("写出 {} 失败: {}", note, e)));
-            CompileFailure(1)
-        })
+        std::fs::write(out_dir.join(name), bytes)
+            .map_err(|e| CompileFailure::env(1, format!("写出 {} 失败: {}", note, e)))
     };
     write(
         "canonical.hir",

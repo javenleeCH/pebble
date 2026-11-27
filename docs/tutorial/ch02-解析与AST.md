@@ -34,7 +34,7 @@ AST 的第一设计原则不是「表达一切」，而是**把语言的红线�
 ```rust
 fn parse_or(&mut self) -> Option<Expr> {
     let mut left = self.parse_and()?;
-    while self.peek() == &Tok::OrOr {
+    while *self.peek() == Tok::OrOr {
         self.advance();
         let right = self.parse_and()?;
         left = Expr::Binary { op: BinOp::Or, left: Box::new(left), right: Box::new(right), ... };
@@ -84,9 +84,9 @@ if self.accept_punct(&Tok::Comma) { continue; }   // 吃掉逗号继续
 | 错误码精确控制 | 每个错误点一行代码，码/span/hint 全可控 | 需要绕它的错误类型做映射层 |
 | 文法规模 | 600 行直接对 EBNF | 组合子图需要框架知识才能审 |
 | API 稳定性 | 自有代码 | 0.9→0.10 彻底重写 |
-| 错误恢复（多错误） | **欠账**：首错即止（第 8 章补） | 内建 `recover_with` |
+| 错误恢复（多错误） | 本章是首错即止；多错误恢复见第 8 章（同步点 + 括号栈） | 内建 `recover_with`——但策略照样要自己设计 |
 
-决策依据：诊断契约是产品（第 3 章），文法又足够小。**对外契约已隔离**：`pebble_parser::parse(source, diags) -> Option<Program>` 是唯一入口，哪天换 Chumsky 只动一个 crate，全部测试保留。这不是永久的否决，是有意的排序。
+决策依据：诊断契约是产品（第 3 章），文法又足够小。**对外契约已隔离**：`pebble_parser::parse(source, diags)` 是唯一入口（第 8 章起返回 `Result<Program, PartialAst>`），哪天换 Chumsky 只动一个 crate，全部测试保留。这不是永久的否决，是有意的排序。
 
 ## AST 不变量自查
 
@@ -94,7 +94,7 @@ if self.accept_punct(&Tok::Comma) { continue; }   // 吃掉逗号继续
 
 1. 只保留语法结构与 Span，不做类型/字段解析；
 2. `Expr::Call` 只代表内置标量函数；聚合调用只存在于 `AggBinding`；
-3. 含未恢复错误的程序不得进入语义层（`parse()` 返回 `None`）。
+3. 含未恢复错误的程序不得进入语义层（本章靠 `parse()` 返回 `None`；第 8 章起返回 `Err(PartialAst)`，由类型系统代为把关）。
 
 ## 跑起来
 
@@ -111,4 +111,4 @@ Remove-Item examples/pardemo.pebble
 
 1. **把 `else if` 展开画出来**：手写 `if a {x} else if b {y} else {z}` 脱糖后的嵌套 If 树（画在纸上），对照 `parse_if_body` 的递归。
 2. **禁止嵌套引用**：`a.b.c` 目前报 PAR-001。把报错改成更友好的 hint（提示最多两级 `别名.字段`），并补一个单测。
-3. **挑战题（为第 8 章热身）**：让 `parse_expr` 在失败后能跳到下一个 `.` 或行首继续，使一次编译报出两个语法错误。想清楚：partial AST 怎么表示（占位节点？）、哪些 invariant 会破。
+3. **挑战题（为第 8 章热身）**：让 `parse_expr` 在失败后能跳到下一个 `.` 或行首继续，使一次编译报出两个语法错误。想清楚：partial AST 怎么表示（占位节点？）、哪些 invariant 会破。（第 8 章给出了答案：同步点、括号栈与 `parse_list`。注意「跳到下一个 `.`」和「跳到行首」这两个朴素想法各自为什么不行——做完再对照。）

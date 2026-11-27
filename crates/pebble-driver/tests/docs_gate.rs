@@ -6,7 +6,9 @@
 //!
 //! 这不是「文档存在性」的形式检查：章节清单与 docs/tutorial/README.md 的
 //! 章节地图是一份受测契约——改教程结构必须同时改这里，防止教程悄然失配。
+//! 第 8 章起再加一道：教程「跑起来」里贴的输出，必须与实现对同一输入的真实报告逐字一致。
 
+use pebble_driver::cmd_build;
 use std::path::PathBuf;
 
 fn repo() -> PathBuf {
@@ -27,6 +29,7 @@ const CHAPTERS: &[&str] = &[
     "ch05-HIR与哈希.md",
     "ch06-DuckDB语义守卫.md",
     "ch07-证据链.md",
+    "ch08-解析器错误恢复.md",
     "appendix-ci-发布门禁.md",
 ];
 
@@ -86,7 +89,7 @@ fn tutorial_chapters_exist_and_well_formed() {
 
 #[test]
 fn tutorial_referenced_assets_exist() {
-    // ch00–ch07 引用的实现资产必须真实存在
+    // ch00–ch08 引用的实现资产必须真实存在
     let repo = repo();
     let assets = [
         "rationale.md",
@@ -119,6 +122,9 @@ fn tutorial_referenced_assets_exist() {
         "examples/06_memory_table.pebble",
         "tests/locks/orders_csv.lock.json",
         "tests/data/orders.csv",
+        "tests/fixtures/diagnostics/multi_error.pebble",
+        "crates/pebble-parser/tests/recovery.rs",
+        "crates/pebble-driver/tests/diagnostics.rs",
         ".github/workflows/ci.yml",
         ".github/workflows/release.yml",
         "crates/pebble-driver/tests/docs_gate.rs",
@@ -135,6 +141,146 @@ fn tutorial_referenced_assets_exist() {
     ] {
         assert!(readme.contains(path), "README 未引用关键路径 {path}");
         assert_exists(repo.join(path), &format!("README 引用的 {path}"));
+    }
+}
+
+/// 抽取 Markdown 中「`marker` 之后第一个 ```text 代码块」的内容（行尾统一成 LF；
+/// 紧贴代码围栏的换行属于排版，不算内容）。
+fn output_block_after<'a>(chapter: &'a str, marker: &str) -> &'a str {
+    let (_, after) = chapter
+        .split_once(marker)
+        .unwrap_or_else(|| panic!("教程缺少标记文本「{marker}」"));
+    let block = after
+        .split("```text")
+        .nth(1)
+        .unwrap_or_else(|| panic!("「{marker}」之后应有 ```text 代码块"));
+    block
+        .split("```")
+        .next()
+        .unwrap_or("")
+        .trim_start_matches('\n')
+}
+
+/// 教程贴的输出必须与实现逐字一致。
+///
+/// ch08「跑起来」展示的是 `pebble build` 对演示文件的完整报告。那段输出一旦与实现不一致，
+/// 读者照着教程跑就会看到别的东西——所以让它成为被测对象：消息、提示、汇总行任何一处改动，
+/// 都必须回来同步教程（或者反过来，教程改错了这里会红灯）。
+#[test]
+fn tutorial_ch08_output_matches_implementation() {
+    let repo = repo();
+    let chapter = read(
+        repo.join("docs")
+            .join("tutorial")
+            .join("ch08-解析器错误恢复.md"),
+    );
+    let shown = output_block_after(&chapter, "最后一条命令的完整输出：");
+
+    let out = std::env::temp_dir()
+        .join("pebble-it")
+        .join("docs-gate-ch08");
+    let _ = std::fs::remove_dir_all(&out);
+    let failure = match cmd_build(
+        &repo.join("tests/fixtures/diagnostics/multi_error.pebble"),
+        &repo.join("tests").join("locks"),
+        &out,
+        None,
+    ) {
+        Ok(_) => panic!("演示文件是故意写错的，不应编译成功"),
+        Err(f) => f,
+    };
+    assert!(
+        !out.exists(),
+        "编译失败时不得写出任何工件：{}",
+        out.display()
+    );
+    let shown = shown.replace("\r\n", "\n");
+    assert_eq!(
+        failure.report.trim_end(),
+        shown.trim_end(),
+        "ch08 教程里的输出已与实现不一致：请同步两者"
+    );
+}
+
+/// 读取 `dir` 下全部 `.rs` 源文件（跳过构建输出目录），行尾统一成 LF。
+fn rust_sources(dir: &PathBuf, out: &mut Vec<String>) {
+    for entry in
+        std::fs::read_dir(dir).unwrap_or_else(|e| panic!("读取 {} 失败: {}", dir.display(), e))
+    {
+        let path = entry.expect("entry").path();
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if path.is_dir() {
+            if name != "target" {
+                rust_sources(&path, out);
+            }
+        } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+            out.push(read(path).replace("\r\n", "\n"));
+        }
+    }
+}
+
+/// 教程引用的代码必须与实现一致（教程纪律第 5 条：「过期即视为 bug」）。
+///
+/// ch08 的每一个 ```rust 代码块都必须逐字出现在某个源文件里。
+/// 代码块里可以用含「（节选）」的行断开；断开之后的每一段仍然必须逐字出现——
+/// 所以「节选」只能用来省略，不能用来改写。
+#[test]
+fn tutorial_ch08_code_quotes_are_verbatim() {
+    let repo = repo();
+    let chapter = read(
+        repo.join("docs")
+            .join("tutorial")
+            .join("ch08-解析器错误恢复.md"),
+    )
+    .replace("\r\n", "\n");
+    let mut sources = Vec::new();
+    rust_sources(&repo.join("crates"), &mut sources);
+    assert!(!sources.is_empty(), "没有读到任何 .rs 源文件");
+
+    let mut blocks: Vec<&str> = Vec::new();
+    let mut rest = chapter.as_str();
+    while let Some((_, after)) = rest.split_once("```rust\n") {
+        let Some((body, after)) = after.split_once("\n```") else {
+            break;
+        };
+        blocks.push(body);
+        rest = after;
+    }
+    assert!(
+        blocks.len() >= 10,
+        "应能从 ch08 抽出至少 10 个 rust 代码块，实际 {}",
+        blocks.len()
+    );
+
+    for (i, block) in blocks.iter().enumerate() {
+        // 按「（节选）」所在的行切成若干段
+        let mut pieces: Vec<String> = vec![String::new()];
+        for line in block.lines() {
+            if line.contains("（节选）") {
+                pieces.push(String::new());
+            } else {
+                let last = pieces.last_mut().expect("至少一段");
+                last.push_str(line);
+                last.push('\n');
+            }
+        }
+        assert!(
+            pieces.len() <= 3,
+            "第 {} 个代码块的节选标记过多（{} 处）——教程应当直接引用实现",
+            i + 1,
+            pieces.len()
+        );
+        for piece in &pieces {
+            if piece.trim().is_empty() {
+                continue;
+            }
+            assert!(
+                sources.iter().any(|s| s.contains(piece.as_str())),
+                "ch08 第 {} 个 rust 代码块里有一段在源码中找不到——实现变了，教程没跟上？\n   {}",
+                i + 1,
+                piece.lines().next().unwrap_or("").trim()
+            );
+        }
     }
 }
 
