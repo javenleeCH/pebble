@@ -1,0 +1,7 @@
+// 第 10 章演示：四个行级算子，最终只占两层 SELECT
+Table("tests/data/orders.csv") as o
+  .filter(o.status == "paid")
+  .extend({ doubled = o.amount * 2 })
+  .select(order_id, customer_id, doubled)
+  .sort(customer_id, order_id)
+  .collect()

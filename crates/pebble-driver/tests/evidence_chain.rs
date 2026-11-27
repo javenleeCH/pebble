@@ -414,5 +414,144 @@ fn extend_and_join_directly_on_source_run_when_duckdb_present() {
     assert!(cmd_verify(&out.join("manifest.json"), &outcome.receipt_path).is_ok());
 }
 
+/// 第 10 章：融合后的 SQL 在真实 DuckDB 上跑出的结果，必须与直接从 CSV 算出来的一致。
+///
+/// 期望值不取自旧版 codegen，而是测试里从 CSV 一步步算出来的——等于用第三种独立的算法验证。
+/// 三个程序分别覆盖：filter + extend 融合（select 另开一层）、join 层吸收后面的算子、
+/// 以及那个曾经让 DuckDB 自己崩溃的长流水线。
+#[test]
+fn fused_layers_match_a_plain_calculation_when_duckdb_present() {
+    set_repo_cwd();
+    if !duckdb_available() {
+        eprintln!("跳过融合回归：未找到 duckdb CLI");
+        return;
+    }
+    let tmp = repo().join("target").join("pebble-it-fusion");
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+
+    // 样例数据：每行 order_id,status,amount,score,customer_id
+    let orders: Vec<Vec<String>> = std::fs::read_to_string(repo().join("tests/data/orders.csv"))
+        .unwrap()
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .skip(1)
+        .map(|l| l.split(',').map(str::to_string).collect())
+        .collect();
+
+    // 编译、执行，返回输出的每一行
+    let run = |name: &str, src: &str| -> Vec<String> {
+        let path = tmp.join(format!("{name}.pebble"));
+        std::fs::write(&path, src).unwrap();
+        let out = tmp.join(name);
+        cmd_build(&path, &locks_dir(), &out, None).expect("build");
+        let outcome = cmd_run(&out, None).expect("run");
+        assert!(outcome.ok, "{name}: {:?}", outcome.output_summary);
+        assert!(cmd_verify(&out.join("manifest.json"), &outcome.receipt_path).is_ok());
+        outcome
+            .output_summary
+            .expect("collect 输出摘要")
+            .lines()
+            .skip(1)
+            .map(str::to_string)
+            .collect()
+    };
+
+    // 1. filter 与 extend 并进同一层；select 另开一层；sort 并进 select 的层
+    let got = run(
+        "filter_extend",
+        "Table(\"tests/data/orders.csv\") as o\n  .filter(o.status == \"paid\")\n  .extend({ doubled = o.amount * 2 })\n  .select(order_id, customer_id, doubled)\n  .sort(customer_id, order_id)\n  .collect()\n",
+    );
+    let mut expected: Vec<String> = orders
+        .iter()
+        .filter(|r| r[1] == "paid")
+        .map(|r| {
+            let doubled = if r[2].is_empty() {
+                "NULL".to_string()
+            } else {
+                (r[2].parse::<i64>().unwrap() * 2).to_string()
+            };
+            format!("{},{},{}", r[0], r[4], doubled)
+        })
+        .collect();
+    expected.sort_by(|a, b| {
+        let key = |l: &str| -> (String, i64) {
+            let p: Vec<&str> = l.split(',').collect();
+            (p[1].to_string(), p[0].parse().unwrap())
+        };
+        key(a).cmp(&key(b))
+    });
+    assert_eq!(got, expected);
+
+    // 1b. filter 紧跟在算出新列的 extend 之后：WHERE 看不到同一层里的别名，必须另开一层。
+    //     若错误地并进同一层，DuckDB 会报列不存在——这正是端到端要抓住的
+    let got = run(
+        "filter_on_new_column",
+        "Table(\"tests/data/orders.csv\") as o\n  .extend({ doubled = o.amount * 2 })\n  .filter(doubled > 100)\n  .select(order_id, doubled)\n  .sort(order_id)\n  .collect()\n",
+    );
+    let expected: Vec<String> = orders
+        .iter()
+        .filter(|r| !r[2].is_empty() && r[2].parse::<i64>().unwrap() * 2 > 100)
+        .map(|r| format!("{},{}", r[0], r[2].parse::<i64>().unwrap() * 2))
+        .collect();
+    assert_eq!(got, expected);
+
+    // 2. join 开新层，后面的 filter、extend 并进去；sort 并进 select 的层
+    let got = run(
+        "join_fused",
+        "Table(\"tests/data/orders.csv\") as a\n  .join(Table(\"tests/data/orders.csv\") as b, on = a.order_id == b.order_id)\n  .filter(b.amount > 300)\n  .extend({ z = a.amount + b.amount })\n  .select(a.order_id, z)\n  .sort(a.order_id)\n  .collect()\n",
+    );
+    let expected: Vec<String> = orders
+        .iter()
+        .filter(|r| !r[2].is_empty() && r[2].parse::<i64>().unwrap() > 300)
+        .map(|r| format!("{},{}", r[0], r[2].parse::<i64>().unwrap() * 2))
+        .collect();
+    assert_eq!(got, expected);
+
+    // 2b. take 之后的 filter：并进同一个 SELECT 就是在 LIMIT 之前过滤，结果会多出一行。
+    //     取金额最高的 3 行（11000、9000、3000），再保留小于 10000 的：应当剩 2 行
+    let got = run(
+        "filter_after_take",
+        "Table(\"tests/data/orders.csv\") as o\n  .sort(o.amount desc)\n  .take(3)\n  .filter(o.amount < 10000)\n  .select(order_id)\n  .collect()\n",
+    );
+    let mut amounts: Vec<i64> = orders
+        .iter()
+        .filter(|r| !r[2].is_empty())
+        .map(|r| r[2].parse().unwrap())
+        .collect();
+    amounts.sort_unstable_by(|a, b| b.cmp(a));
+    let top3: Vec<i64> = amounts.into_iter().take(3).collect();
+    let expected: Vec<String> = top3
+        .iter()
+        .filter(|a| **a < 10000)
+        .map(|a| {
+            orders
+                .iter()
+                .find(|r| r[2] == a.to_string())
+                .map(|r| r[0].clone())
+                .unwrap()
+        })
+        .collect();
+    assert_eq!(
+        expected.len(),
+        2,
+        "这个程序必须能区分「先截取后过滤」与「先过滤后截取」"
+    );
+    assert_eq!(got, expected);
+
+    // 3. 两千个 filter：v1 的两千层嵌套会让 DuckDB 解析失败；融合后只有一个 WHERE
+    let mut src = String::from("Table(\"tests/data/orders.csv\") as o\n");
+    src.push_str(&"  .filter(o.amount > 100)\n".repeat(2000));
+    src.push_str("  .sort(order_id)\n  .collect()\n");
+    let got = run("long_chain", &src);
+    let expected: Vec<String> = orders
+        .iter()
+        .filter(|r| !r[2].is_empty() && r[2].parse::<i64>().unwrap() > 100)
+        .map(|r| r.join(","))
+        .collect();
+    assert_eq!(got.len(), expected.len());
+    assert_eq!(got, expected);
+}
+
 #[allow(dead_code)]
 fn unused(_: &Path) {}

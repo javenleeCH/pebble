@@ -96,7 +96,9 @@ SELECT ... ;
 
 ## 一层套一层：流水线怎么变成 SQL
 
-先把结构说清楚，下面两个 bug 都出在这里。HIR 的每个节点被翻译成**一层子查询**，包住它的输入：
+> 本节描述的是 **v1** 的 SQL 形态：每个算子一层子查询。[第 10 章](ch10-codegen融合.md)把它改成了 v2——连续的行级算子并进同一层 `SELECT`。两个病例的病因分析与修法不受影响。
+
+先把结构说清楚，下面两个 bug 都出在这里。v1 把 HIR 的每个节点翻译成**一层子查询**，包住它的输入：
 
 ```text
 Table("orders.csv")        →  SELECT "t0"."status" AS "f0", … FROM read_csv(…) AS "t0"
@@ -160,8 +162,9 @@ n 个算子的流水线，就在调用栈上叠 n 层。两万个 `.filter` 连�
 这里的解法比设上限更好，因为**根本不需要递归**。HIR 的节点是按拓扑序存放的：每个节点都排在它的输入之后。按存放顺序从前往后逐个生成，轮到某个节点时，它的输入早就生成好了，直接从数组里取：
 
 ```rust
-    fn emit_all(&self) -> Result<Vec<String>, String> {
-        let mut sql = Vec::with_capacity(self.hir.nodes.len());
+    fn emit_all(&self) -> Result<Vec<Option<String>>, String> {
+        let mut sql: Vec<Option<String>> = vec![None; self.hir.nodes.len()];
+        let mut open: Option<Block> = None;
         for (i, node) in self.hir.nodes.iter().enumerate() {
             // 防御：若某个输入排在消费者之后（或不存在），下标取值就会错——明确报内部错误
             if let Some(bad) = node
@@ -174,20 +177,38 @@ n 个算子的流水线，就在调用栈上叠 n 层。两万个 `.filter` 连�
                     "内部错误：节点 {i} 的输入 {bad} 未排在它之前（HIR 不是拓扑序）"
                 ));
             }
-            let text = match node {
-                HirNode::Source { base, source, kind } => self.emit_scan(base.id, *source, kind)?,
-                HirNode::Transform { base, kind } => self.emit_transform(base, kind, &sql)?,
+            match node {
+                HirNode::Source { base, source, kind } => {
+                    // 源是最里层：把表里的列重命名成 f<id>（第 5 章的身份直通后端）
+                    sql[i] = Some(self.emit_scan(base.id, *source, kind)?);
+                }
+                HirNode::Terminal { base, .. } => {
+                    // 终端不属于任何一层；它只负责把最后一个块封口
+                    self.close(&mut open, &mut sql, base.inputs[0] as usize)?;
+                }
+                HirNode::Transform { base, kind } => {
+                    self.lower_transform(i, base, kind, &mut sql, &mut open)?;
+                }
                 HirNode::Aggregate {
                     base,
                     group_keys,
                     bindings,
-                } => self.emit_aggregate(base, group_keys, bindings, &sql)?,
-                HirNode::Terminal { .. } => String::new(), // 终端由 final_select 负责
-            };
-            sql.push(text);
+                } => {
+                    let input = base.inputs[0] as usize;
+                    let from = self.close(&mut open, &mut sql, input)?;
+                    open = Some(self.aggregate_block(
+                        i as pebble_hir::NodeId,
+                        from,
+                        self.output_ids(base.inputs[0]),
+                        group_keys,
+                        bindings,
+                    ));
+                }
+            }
         }
         Ok(sql)
     }
+
 ```
 
 同一个仓库里，「沿着输入走」一共有三样办法，各管一类情形：
@@ -210,7 +231,7 @@ std::thread::Builder::new()
 
 递归实现在 256 KiB 的栈上叠 2 000 层，必然溢出；迭代实现根本不碰栈。这条测试在修复前会让测试进程直接崩溃（`thread '<unknown>' has overflowed its stack`，CI 红灯），修复后 0.07 秒跑完。SQL codegen 和 LaTeX 视图各有一条（`crates/pebble-duckdb/tests/long_pipeline.rs`、`pebble-latex` 的单测）。
 
-### 诚实的边界：引擎也有上限
+### 诚实的边界：引擎也有上限（已在第 10 章解决）
 
 编译器不再崩溃了，但「一个算子一层子查询」这种 SQL 形态本身有极限。在 DuckDB 1.4.1 上实测，连续 `.filter` 的个数：
 
@@ -220,7 +241,7 @@ std::thread::Builder::new()
 | 350–450 | **DuckDB 自己栈溢出**（回执里记着退出码 `-1073741571`） |
 | 500 及以上 | DuckDB 解析器拒绝：`Max expression depth limit of 1000 exceeded` |
 
-也就是说，超过三百个算子的流水线，目前的 M0 后端执行不了。失败会被如实记进回执（第 7 章：失败也是证据），不会悄悄出错，但这终究是个限制。根治的办法是换一种 SQL 形态：把连续的行级算子融合进**同一层** `SELECT`（多个 `filter` 合成一个 `WHERE`，`extend` 进 `select` 列表，`sort` + `take` 进 `ORDER BY` / `LIMIT`），只在聚合、连接这类必须分层的地方才开新的子查询。它会改变所有程序的 canonical SQL，所以要当作一次工件版本升级（`artifact v2`）来对待。
+也就是说，超过三百个算子的流水线，v1 后端执行不了。失败会被如实记进回执（第 7 章：失败也是证据），不会悄悄出错，但这是个真实的限制——发现它的当天就如实记在这里，而不是等修好之后再补。根治的办法是换一种 SQL 形态：把连续的行级算子并进同一层 `SELECT`。它会改变所有程序的 canonical SQL，所以作为一次工件版本升级（`artifact v2`）来做——那是[第 10 章](ch10-codegen融合.md)的内容。v2 下两万个连续 `filter` 的流水线只有两层嵌套，在同一个 DuckDB 上正常运行。
 
 还有一个已知的小代价：每生成一层都要把内层的 SQL 复制一遍，n 层的总复制量是 O(n²)。现实中的流水线只有几十个算子，感觉不到；但心里要有数。
 
@@ -267,6 +288,6 @@ Select-String -Path examples/target/pebble/00_m0_revenue/plan.sql -Pattern "HUGE
 2. **MOD 符号验证**：Pebble 规范说 `%` 结果符号随被除数。查 DuckDB 行为并写测试钉住；如果它随除数，你需要在守卫里补什么？（提示：`sign(r)*abs(x)%abs(r)` 模式）
 3. **write 的 CSV null 表示**：DuckDB 默认把 NULL 写成空串。规范没定义 null 的 CSV 序列化——先在 06-operators 补规范，再改 codegen，体会「规范先行」的顺序。
 4. **思考题**：如果把 `SET threads TO 1` 去掉，哪些现有测试会挂？哪些**永远不会**挂但语义已经悄悄不可复现？（提示：整数聚合 vs 浮点聚合）
-5. **融合**：把连续的 `filter` 合并进同一层 `WHERE`。动手前先想清楚三件事：canonical SQL 变了，对已经审批过的 manifest 意味着什么？第 4 章的流敏收缩会不会因为合并而改变？工件要不要升版本号？
+5. **融合**：把连续的 `filter` 合并进同一层 `WHERE`。（这一题已经在[第 10 章](ch10-codegen融合.md)实现，可以先自己设计一遍，再对照。）动手前先想清楚三件事：canonical SQL 变了，对已经审批过的 manifest 意味着什么？第 4 章的流敏收缩会不会因为合并而改变？工件要不要升版本号？
 6. **O(n²) 的复制**：`emit_all` 每生成一层都要复制内层的 SQL。改用一个显式栈，把各层的前缀和后缀直接写进同一个 `String`，让总代价变成 O(n)。（提示：只有一个输入的节点，输出的是「前缀 + 内层 + 后缀」。）
-7. **找引擎的上限**：用二分法找出 DuckDB 能接受的最大连续算子数。编译器该不该在编译期就拒绝超过它的流水线？说说利弊。（提示：规范要求后端能力诊断使用独立类别，不能替代语言诊断。）
+7. **找引擎的上限**：用二分法找出 DuckDB 能接受的最大连续算子数（v1 的实测结果见上一节；切回提交 `bebd87c` 可以自己复现）。编译器该不该在编译期就拒绝超过它的流水线？说说利弊。（提示：规范要求后端能力诊断使用独立类别，不能替代语言诊断。）

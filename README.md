@@ -13,6 +13,9 @@
 >
 > **第 9 章（语义层错误恢复）已完成**：语义错误同样一次报完；定义失败的名字被毒化，它的后果不再被报成新错误。
 > 试试 [tests/fixtures/diagnostics/multi_semantic_error.pebble](tests/fixtures/diagnostics/multi_semantic_error.pebble)，教程见 [`docs/tutorial/ch09-语义层错误恢复.md`](docs/tutorial/ch09-语义层错误恢复.md)。
+>
+> **第 10 章（codegen 融合）已完成**：DuckDB 后端不再给每个算子套一层子查询，连续的 `filter` / `extend` / `select` / `sort` 并进同一层 `SELECT`（工件版本 v2）。
+> 两万个连续 `filter` 的流水线此前会让引擎崩溃，现在正常运行。教程见 [`docs/tutorial/ch10-codegen融合.md`](docs/tutorial/ch10-codegen融合.md)。
 
 ## 文档导航
 
@@ -61,4 +64,4 @@ Rust 2024 · 手写递归下降解析（原型实现选择；Chumsky 为路线�
 
 M0 明确不做：Polars/多后端、另写解释器、自建 Physical Plan、Arrow 全栈、自研 storage；having/cast/时间函数/coalesce/split 按计划后置。
 
-已知限制（如实记录）：DuckDB 后端为每个算子生成一层嵌套子查询，连续约 300 个算子以上引擎无法执行（实测，见第 6 章）。
+工件版本：DuckDB 后端的 SQL 形态为 v2（第 10 章）。v1 给每个算子套一层子查询，实测连续约 300 个算子以上 DuckDB 就无法执行；v2 把连续的行级算子并进同一层 `SELECT`，这个限制已消除。

@@ -30,7 +30,9 @@ impl BackendArtifact {
     pub fn canonical_bytes(&self) -> Vec<u8> {
         match self {
             BackendArtifact::DuckDbSql { canonical_sql } => {
-                let mut b = b"pebble-backend-artifact/duckdb-sql/v1\0".to_vec();
+                // 域分隔前缀带形态版本：v1（每算子一层子查询）与 v2（行级算子融合）
+                // 的工件不可能得到相同的哈希，旧审批因此不可能被误用到新构建上
+                let mut b = b"pebble-backend-artifact/duckdb-sql/v2\0".to_vec();
                 b.extend_from_slice(canonical_sql.as_bytes());
                 b
             }

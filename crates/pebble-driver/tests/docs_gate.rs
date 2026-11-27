@@ -7,6 +7,8 @@
 //! 这不是「文档存在性」的形式检查：章节清单与 docs/tutorial/README.md 的
 //! 章节地图是一份受测契约——改教程结构必须同时改这里，防止教程悄然失配。
 //! 第 8 章起再加一道：教程「跑起来」里贴的输出，必须与实现对同一输入的真实报告逐字一致。
+//! 第 9 章起代码引用的逐字检查按章节表登记；第 10 章起再加：教程里贴的生成的 SQL
+//! 必须与实现生成的 plan.sql 逐字一致（只允许换行与缩进不同）。
 
 use pebble_driver::cmd_build;
 use std::path::PathBuf;
@@ -31,6 +33,7 @@ const CHAPTERS: &[&str] = &[
     "ch07-证据链.md",
     "ch08-解析器错误恢复.md",
     "ch09-语义层错误恢复.md",
+    "ch10-codegen融合.md",
     "appendix-ci-发布门禁.md",
 ];
 
@@ -133,6 +136,7 @@ fn tutorial_referenced_assets_exist() {
         "tests/data/orders.csv",
         "tests/fixtures/diagnostics/multi_error.pebble",
         "tests/fixtures/diagnostics/multi_semantic_error.pebble",
+        "tests/fixtures/codegen/fusion_demo.pebble",
         "crates/pebble-parser/tests/recovery.rs",
         "crates/pebble-driver/tests/diagnostics.rs",
         ".github/workflows/ci.yml",
@@ -154,24 +158,25 @@ fn tutorial_referenced_assets_exist() {
     }
 }
 
-/// 抽取 Markdown 中「`marker` 之后第一个 ```text 代码块」的内容。
+/// 抽取 Markdown 中「`marker` 之后第一个语言为 `fence` 的代码块」的内容。
 /// 紧贴代码围栏的换行属于排版，不算内容。行尾无论是 LF 还是 CRLF，结果都一样。
-fn output_block_after(chapter: &str, marker: &str) -> String {
+fn fenced_block_after(chapter: &str, marker: &str, fence: &str) -> String {
     // 先统一行尾：CRLF 下围栏之后的换行是 `\r\n`，只剥 `\n` 的清理会留下一个 `\r`
     let chapter = chapter.replace("\r\n", "\n");
     let (_, after) = chapter
         .split_once(marker)
         .unwrap_or_else(|| panic!("教程缺少标记文本「{marker}」"));
+    let opening = format!("```{fence}\n");
     let block = after
-        .split("```text")
+        .split(&opening)
         .nth(1)
-        .unwrap_or_else(|| panic!("「{marker}」之后应有 ```text 代码块"));
-    block
-        .split("```")
-        .next()
-        .unwrap_or("")
-        .trim_start_matches('\n')
-        .to_string()
+        .unwrap_or_else(|| panic!("「{marker}」之后应有 {opening:?} 开头的代码块"));
+    block.split("```").next().unwrap_or("").to_string()
+}
+
+/// 教程「跑起来」里贴的输出（```text 代码块）。
+fn output_block_after(chapter: &str, marker: &str) -> String {
+    fenced_block_after(chapter, marker, "text")
 }
 
 /// 这段输出比对曾经「本地绿、CI 红」：GitHub 的 Windows runner 以 CRLF 检出，
@@ -183,14 +188,30 @@ fn output_block_extractor_is_line_ending_agnostic() {
     let crlf = lf.replace('\n', "\r\n");
     assert_eq!(output_block_after(&lf, marker), "line 1\nline 2\n");
     assert_eq!(output_block_after(&crlf, marker), "line 1\nline 2\n");
+    // 围栏语言是抽取条件的一部分：要 sql 就不能拿到 text 块；紧贴围栏的换行不算内容
+    let mixed = format!("{marker}\n\n```sql\nSELECT 1;\n```\n\n```text\nnot this\n```\n");
+    assert_eq!(fenced_block_after(&mixed, marker, "sql"), "SELECT 1;\n");
 }
 
-/// 需要「输出 / 代码引用逐字一致」检查的章节：`docs/tutorial/` 下的文件名 → 它「跑起来」用的演示文件。
-/// 新增一章带演示输出的教程时，在这里登记一行。
-const VERBATIM_CHAPTERS: &[(&str, &str)] = &[
+/// 「报告输出逐字一致」的章节：`docs/tutorial/` 下的文件名 → 它「跑起来」用的（故意写错的）演示文件。
+/// 新增一章带编译报告的教程时，在这里登记一行。
+const REPORT_CHAPTERS: &[(&str, &str)] = &[
     ("ch08-解析器错误恢复.md", "multi_error.pebble"),
     ("ch09-语义层错误恢复.md", "multi_semantic_error.pebble"),
 ];
+
+/// 「代码引用逐字一致」的章节：这些章节里的每个 rust 代码块都必须出现在源码里。
+const QUOTE_CHAPTERS: &[&str] = &[
+    "ch08-解析器错误恢复.md",
+    "ch09-语义层错误恢复.md",
+    "ch10-codegen融合.md",
+];
+
+/// 「生成的 SQL 逐字一致」的章节：文件名 → 演示的 Pebble 源文件（相对仓库根）。
+const SQL_CHAPTERS: &[(&str, &str)] = &[(
+    "ch10-codegen融合.md",
+    "tests/fixtures/codegen/fusion_demo.pebble",
+)];
 
 /// 教程贴的输出必须与实现逐字一致。
 ///
@@ -304,17 +325,60 @@ fn assert_rust_quotes_are_verbatim(chapter: &str, min_blocks: usize) {
     }
 }
 
+/// 教程贴的**生成的 SQL** 必须与实现逐字一致（只允许换行与缩进不同）。
+///
+/// 读者是照着这段 SQL 学 codegen 的。它一旦与实现不一致，教程讲的就不是编译器真正生成的东西。
+/// 为了可读性，教程里会手工折行、缩进；所以比较之前把两边的空白全部去掉。
+fn assert_tutorial_sql_matches(chapter: &str, demo: &str) {
+    fn squash(s: &str) -> String {
+        s.chars().filter(|c| !c.is_whitespace()).collect()
+    }
+    let repo = repo();
+    let text = read(repo.join("docs").join("tutorial").join(chapter));
+    let shown = fenced_block_after(
+        &text,
+        "最后一条命令生成的 plan.sql（只调整了换行和缩进）：",
+        "sql",
+    );
+
+    let out = std::env::temp_dir()
+        .join("pebble-it")
+        .join("docs-gate-sql")
+        .join(PathBuf::from(demo).file_stem().unwrap());
+    let _ = std::fs::remove_dir_all(&out);
+    cmd_build(
+        &repo.join(demo),
+        &repo.join("tests").join("locks"),
+        &out,
+        None,
+    )
+    .unwrap_or_else(|e| panic!("{demo} 应当能编译: {e:?}"));
+    let actual = read(out.join("plan.sql"));
+    assert_eq!(
+        squash(&shown),
+        squash(&actual),
+        "{chapter} 教程里贴的 plan.sql 已与实现不一致：请同步两者"
+    );
+}
+
 #[test]
 fn tutorial_output_matches_implementation() {
-    for (chapter, fixture) in VERBATIM_CHAPTERS {
+    for (chapter, fixture) in REPORT_CHAPTERS {
         assert_tutorial_output_matches(chapter, fixture);
     }
 }
 
 #[test]
 fn tutorial_rust_code_quotes_are_verbatim() {
-    for (chapter, _) in VERBATIM_CHAPTERS {
+    for chapter in QUOTE_CHAPTERS {
         assert_rust_quotes_are_verbatim(chapter, 5);
+    }
+}
+
+#[test]
+fn tutorial_generated_sql_matches_implementation() {
+    for (chapter, demo) in SQL_CHAPTERS {
+        assert_tutorial_sql_matches(chapter, demo);
     }
 }
 
