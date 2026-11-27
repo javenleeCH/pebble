@@ -247,6 +247,12 @@ fn emit_expr(e: &THirExpr, names: &BTreeMap<FieldId, String>) -> String {
             let list: Vec<String> = args.iter().map(|a| emit_expr(a, names)).collect();
             format!("{}\\left({}\\right)", fname, list.join(",\\; "))
         }
+        // 受限 cast：\mathrm{cast}_{i64}(x)。目标类型写在右下角，一眼看得出转成了什么
+        THirExpr::Cast { expr, to, .. } => format!(
+            "\\mathrm{{cast}}_{{{}}}\\left({}\\right)",
+            escape(&to.render()),
+            emit_expr(expr, names)
+        ),
     }
 }
 
@@ -365,5 +371,44 @@ mod tests {
             })
             .expect("spawn");
         handle.join().expect("渲染线程不应 panic");
+    }
+
+    /// 受限 cast 在审计视图里写成 \mathrm{cast}_{目标类型}(x)（第 11 章）。
+    #[test]
+    fn renders_cast_with_its_target_type() {
+        let span = Span::new(0, 0);
+        let mut hir = long_chain(1);
+        // 把 filter 的谓词换成 cast(o.f0 as i64) > 1
+        if let HirNode::Transform {
+            kind: TransformKind::Filter { pred },
+            ..
+        } = &mut hir.nodes[1]
+        {
+            *pred = THirExpr::Binary {
+                op: BinOp::Gt,
+                left: Box::new(THirExpr::Cast {
+                    expr: Box::new(THirExpr::Field {
+                        field: 0,
+                        ty: Type::F64,
+                        span,
+                    }),
+                    to: Type::I64,
+                    ty: Type::Opt(Box::new(Type::I64)),
+                    span,
+                }),
+                right: Box::new(THirExpr::Literal {
+                    value: pebble_hir::Literal::Int(1),
+                    ty: Type::I64,
+                    span,
+                }),
+                ty: Type::Opt(Box::new(Type::Bool)),
+                span,
+            };
+        }
+        let view = algebra_view(&hir);
+        assert!(
+            view.contains("\\mathrm{cast}_{i64}\\left(\\mathrm{amount}\\right)"),
+            "{view}"
+        );
     }
 }

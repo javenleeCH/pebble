@@ -67,10 +67,12 @@ struct Block {
     /// WHERE 里的谓词，按流水线顺序。发射时合成一棵平衡的 AND 树（见 `and_all`）
     predicates: Vec<String>,
     group_by: Option<Vec<String>>,
+    // …（节选）第 11 章在这里加了两个字段：having 与 subst
     order_by: Vec<String>,
     limit: Option<i64>,
     /// 屏障：之后的算子不得再并进来（distinct / take / 聚合）。
-    /// 它们后面的 filter 若并进 WHERE，就等于跑到了它们前面——结果会变
+    /// 它们后面的 filter 若并进 WHERE，就等于跑到了它们前面——结果会变。
+    /// 唯一的例外是聚合层：紧跟其后的 filter 是「对分组结果过滤」，并进它的 HAVING
     barrier: bool,
 }
 ```
@@ -112,6 +114,9 @@ struct Block {
                 let _ = write!(sql, " GROUP BY {}", keys.join(", "));
             }
         }
+        if !self.having.is_empty() {
+            let _ = write!(sql, " HAVING ({})", and_all(&self.having));
+        }
         if !self.order_by.is_empty() {
             let _ = write!(sql, " ORDER BY {}", self.order_by.join(", "));
         }
@@ -128,7 +133,8 @@ struct Block {
 
 ```rust
             TransformKind::Filter { pred } => {
-                let pred_sql = self.emit_expr(pred);
+                // …（节选）第 11 章在这里加了一段：聚合层开着时，filter 并进它的 HAVING
+                let pred_sql = self.emit_expr(pred, &NO_SUBST);
                 // 能并进当前的 WHERE 吗？谓词引用的列必须都直接来自这一层的 FROM。
                 // 引用了本层选择列表里新算出来的列就不行：标准 SQL 的 WHERE 看不到同一个 SELECT 里的别名。
                 //（DuckDB 其实允许这种引用——那是它的方言扩展。不依赖它：生成的 SQL 只建立在标准语义上。）
@@ -225,7 +231,7 @@ D > SELECT a AS c FROM (VALUES (1),(2),(3)) t(a) WHERE c > 1;
 
 **`sort` 的论证**：`ORDER BY` 只决定输出的顺序。先排序、之后再算新列，行还是那个顺序；先过滤、再排序，和先排序、再过滤留下的是同一批行，留下的行之间的相对顺序也不变。条件是这一层还没有 `ORDER BY` 和 `LIMIT`。
 
-**`take` 为什么不并**：`ORDER BY … LIMIT n` 写在同一条 SELECT 里，DuckDB 可能走一条专门的执行路径（top-N）。当排序键有并列、而截断线正好落在并列处时，它选出的行不一定和"先完整排序、再取前 n 行"一样。Pebble 的规范没有规定并列时谁在前，所以这是一个**真实的不确定点**。在规范把它定下来之前，`take` 自己占一层，和 v1 完全一样。
+**`take` 为什么不并**：`ORDER BY … LIMIT n` 写在同一条 SELECT 里，DuckDB 可能走一条专门的执行路径（top-N）。当排序键有并列、而截断线正好落在并列处时，它选出的行不一定和"先完整排序、再取前 n 行"一样。规范（7.11）对并列时的顺序不做承诺，所以两种写法都合规；但 v2 对 v1 的承诺是**结果逐字相同**，而同一个程序在并列处的输出可能因这次合并而改变。所以 `take` 自己占一层，和 v1 完全一样。
 
 ### 5. 屏障：并进去就会改变结果的算子
 
@@ -238,6 +244,8 @@ D > SELECT a AS c FROM (VALUES (1),(2),(3)) t(a) WHERE c > 1;
 | `distinct` | 变成"去重之前过滤" | 结果其实相同（重复的行一模一样，谓词结果也相同），但这是一次**改写**而不是一次**合并**；改写需要单独论证，本章不做 |
 
 第三行是故意保守的：它说明"结果相同"不是合并的唯一标准，还得说清楚**为什么**相同，并为此负责。
+
+聚合那一行后来有了唯一的例外：紧跟在聚合之后的 `filter`，并进聚合层的 `HAVING`。论证和实现都在[第 11 章](ch11-having与cast.md)——那正是 `having` 这个语法糖落脚的地方。
 
 ### 6. join：开新的一层，但它不是屏障
 

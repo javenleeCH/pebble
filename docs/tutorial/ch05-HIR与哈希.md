@@ -108,6 +108,8 @@ cargo run -p pebble-driver -- build examples/00_m0_revenue.pebble --locks tests/
 Get-Content examples/target/pebble/00_m0_revenue/plan.txt   # 人类可读 dump
 ```
 
+给 HIR 加新东西时有一条铁律：旧程序的哈希不能变。第 11 章加表达式 `Cast` 的做法是「只加不改」——新变体用新标签 `V`，既有编码一个字节不动——并用一条写死了样例哈希的测试钉住它，见[第 11 章](ch11-having与cast.md)。
+
 ## 练习
 
 1. **反序列化**：`canonical.rs` 只有「写」。实现读（canonical bytes → Hir），加 roundtrip 测试：`hir_hash(deserialize(serialize(h))) == hir_hash(h)`。这是 M2「verifier 独立化」的前置件。

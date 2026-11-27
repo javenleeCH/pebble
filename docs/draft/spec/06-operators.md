@@ -3,7 +3,7 @@
 算子分四类：**源算子**（流水线起点）、**变换算子**（纯、无副作用）、**聚合算子**、**终端算子**（唯一允许副作用）。
 
 > 语法定稿以 `docs/design-decisions.md` v3 为准：保留 `.` 链、`map→extend`、废 Lambda、`on =`、`select as`、统一尾逗号。
-> `join`/`distinct`/`write`/`print` 保留在草案，标记为 **MVP 硬化候选**；`having`/`cast`/时间函数/`coalesce`/`split` 后置。
+> `join`/`distinct`/`write`/`print` 保留在草案，标记为 **MVP 硬化候选**；`having` 与受限 `cast` 自 v0.1.1 起启用（见 04 §4.12、本节 6.4）；时间函数/`coalesce`/`split` 仍后置。
 
 ## 6.1 算子总览
 
@@ -20,6 +20,7 @@
 | 变换 | `join` | 连接 ⋈ | 是 | 硬化候选 |
 | 聚合 | `group_by` | 分组 γ | 是 | MVP |
 | 聚合 | `agg` | 聚合 γ | 是 | MVP |
+| 聚合 | `having` | 选择 σ（作用于分组结果） | 是 | v0.1.1 |
 | 终端 | `write` | — | 否（副作用） | 硬化候选 |
 | 终端 | `collect` | — | 否（回传宿主） | MVP |
 | 终端 | `print` | — | 否（标准输出） | 硬化候选 |
@@ -183,6 +184,22 @@ MemoryTable("users") as u
 | 约束 | 可直接接在任意上游算子后表示全局聚合；`group_by + agg` 视为单个聚合节点；聚合函数不得出现在其他算子中 |
 | 空输入 | 分组聚合：零行；全局聚合：恰好一行，`count()`=0，`sum/min/max/avg` 为 null |
 
+### `having(pred)`（v0.1.1）
+
+```pebble
+.group_by(o.customer_id)
+.agg(order_count = count(), revenue = sum(o.amount))
+.having(revenue >= 10000)
+```
+
+| 项 | 说明 |
+|---|---|
+| 参数 | 返回 `bool` 或 `?bool` 的表达式；解析域是聚合节点的输出（分组键与聚合绑定） |
+| 语义 | 与紧随其后的普通 `filter` **完全相同**：保留谓词为 `true` 的分组；非空收缩规则也相同 |
+| 约束 | 必须紧跟在 `agg` 之后，否则 SEM-005 |
+| Lowering | 实现把它 lowering 成与 `filter` 相同的 HIR 结构：`.agg(…).having(p)` 与 `.agg(…).filter(p)` 的 HIR 哈希相同 |
+
+`having` 是语法糖。Pebble 的 `filter` 本来就能作用于聚合输出（不像 SQL 的 `WHERE` 看不到聚合值），所以它不引入新的语义，只是让「对分组结果过滤」的意图在源码里更醒目。后端可以把这个过滤发射为 SQL 的 `HAVING`。
 ## 6.5 终端算子
 
 ### `write(path)`（硬化候选）
@@ -228,4 +245,5 @@ MemoryTable("users") as u
 3. `group_by` 之后只能接 `agg`；`agg` 可直接接在任意上游算子后表示全局聚合。
 4. `join` 右表必须是源算子。
 5. `recordLiteral` 只允许作为 `extend` 的参数。
-6. 变换算子不得产生外部 IO；除终端算子外全部为纯变换。
+6. `having` 必须紧跟在 `agg` 之后；它等价于作用于聚合输出的 `filter`。
+7. 变换算子不得产生外部 IO；除终端算子外全部为纯变换。

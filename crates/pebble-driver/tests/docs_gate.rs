@@ -34,6 +34,7 @@ const CHAPTERS: &[&str] = &[
     "ch08-解析器错误恢复.md",
     "ch09-语义层错误恢复.md",
     "ch10-codegen融合.md",
+    "ch11-having与cast.md",
     "appendix-ci-发布门禁.md",
 ];
 
@@ -137,6 +138,13 @@ fn tutorial_referenced_assets_exist() {
         "tests/fixtures/diagnostics/multi_error.pebble",
         "tests/fixtures/diagnostics/multi_semantic_error.pebble",
         "tests/fixtures/codegen/fusion_demo.pebble",
+        "tests/fixtures/codegen/having_demo.pebble",
+        "tests/fixtures/codegen/cast_demo.pebble",
+        "tests/data/casts.csv",
+        "tests/data/strings.csv",
+        "tests/locks/casts_csv.lock.json",
+        "tests/locks/strings_csv.lock.json",
+        "crates/pebble-driver/tests/differential.rs",
         "crates/pebble-parser/tests/recovery.rs",
         "crates/pebble-driver/tests/diagnostics.rs",
         ".github/workflows/ci.yml",
@@ -205,13 +213,28 @@ const QUOTE_CHAPTERS: &[&str] = &[
     "ch08-解析器错误恢复.md",
     "ch09-语义层错误恢复.md",
     "ch10-codegen融合.md",
+    "ch11-having与cast.md",
 ];
 
-/// 「生成的 SQL 逐字一致」的章节：文件名 → 演示的 Pebble 源文件（相对仓库根）。
-const SQL_CHAPTERS: &[(&str, &str)] = &[(
-    "ch10-codegen融合.md",
-    "tests/fixtures/codegen/fusion_demo.pebble",
-)];
+/// 「生成的 SQL 逐字一致」的条目：（章节文件名, 教程里代码块之前的标记文本, 演示的 Pebble 源文件）。
+/// 一章可以登记多段：每段用自己的标记文本定位。
+const SQL_CHAPTERS: &[(&str, &str, &str)] = &[
+    (
+        "ch10-codegen融合.md",
+        "最后一条命令生成的 plan.sql（只调整了换行和缩进）：",
+        "tests/fixtures/codegen/fusion_demo.pebble",
+    ),
+    (
+        "ch11-having与cast.md",
+        "having 程序生成的 plan.sql（只调整了换行和缩进）：",
+        "tests/fixtures/codegen/having_demo.pebble",
+    ),
+    (
+        "ch11-having与cast.md",
+        "cast 程序生成的 plan.sql（只调整了换行和缩进）：",
+        "tests/fixtures/codegen/cast_demo.pebble",
+    ),
+];
 
 /// 教程贴的输出必须与实现逐字一致。
 ///
@@ -329,17 +352,13 @@ fn assert_rust_quotes_are_verbatim(chapter: &str, min_blocks: usize) {
 ///
 /// 读者是照着这段 SQL 学 codegen 的。它一旦与实现不一致，教程讲的就不是编译器真正生成的东西。
 /// 为了可读性，教程里会手工折行、缩进；所以比较之前把两边的空白全部去掉。
-fn assert_tutorial_sql_matches(chapter: &str, demo: &str) {
+fn assert_tutorial_sql_matches(chapter: &str, marker: &str, demo: &str) {
     fn squash(s: &str) -> String {
         s.chars().filter(|c| !c.is_whitespace()).collect()
     }
     let repo = repo();
     let text = read(repo.join("docs").join("tutorial").join(chapter));
-    let shown = fenced_block_after(
-        &text,
-        "最后一条命令生成的 plan.sql（只调整了换行和缩进）：",
-        "sql",
-    );
+    let shown = fenced_block_after(&text, marker, "sql");
 
     let out = std::env::temp_dir()
         .join("pebble-it")
@@ -377,8 +396,8 @@ fn tutorial_rust_code_quotes_are_verbatim() {
 
 #[test]
 fn tutorial_generated_sql_matches_implementation() {
-    for (chapter, demo) in SQL_CHAPTERS {
-        assert_tutorial_sql_matches(chapter, demo);
+    for (chapter, marker, demo) in SQL_CHAPTERS {
+        assert_tutorial_sql_matches(chapter, marker, demo);
     }
 }
 

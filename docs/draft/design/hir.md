@@ -185,7 +185,8 @@ pub enum AggFunc { Count, Sum, Min, Max, Avg }
 4. `sum/min/max/avg` 的可空性由空组、全 null 和 checked 溢出共同决定，不能按函数名硬编码为非空。
 5. 聚合参数引用组内输入行，分组键是组级值；同一节点的聚合输出互不可见。
 6. 聚合后只暴露分组键与聚合输出。全局聚合的聚合函数之外不得引用输入行字段。
-7. 聚合后的过滤使用普通 `Filter`；未来 `having` 若启用，也必须 lowering 到语义等价且可审计的结构。
+7. 聚合后的过滤使用普通 `Filter`；`having`（v0.1.1）lowering 成同一个 `Filter`，HIR 完全相同。
+8. `THirExpr::Cast`（v0.1.1）：受限显式转换，canonical 标签 `V`，依次编码目标基础类型、操作数、结果类型。既有变体的编码不变，所以不含 cast 的程序哈希不变。
 
 ## 7. 终端节点
 

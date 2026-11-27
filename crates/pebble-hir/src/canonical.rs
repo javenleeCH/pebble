@@ -271,6 +271,15 @@ fn encode_expr(w: &mut ByteWriter, e: &crate::THirExpr) {
             }
             encode_type(w, ty);
         }
+        // v0.1.1 新增。`V` 取「type conVersion」之意，是这个文件里此前从未用过的标签
+        // （节点层的 `K` 已经表示 Take；让每个标签在全文件唯一，将来写解码器不用区分位置）。
+        // 既有变体的编码一个字节都没变，所以不含 cast 的程序哈希不变（hir.md §6 第 8 条）
+        crate::THirExpr::Cast { expr, to, ty, .. } => {
+            w.tag(b"V");
+            encode_type(w, to);
+            encode_expr(w, expr);
+            encode_type(w, ty);
+        }
     }
 }
 
@@ -321,5 +330,114 @@ impl ByteWriter {
 
     fn hash(&mut self, h: &Hash) {
         self.out.extend_from_slice(&h.0);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{FieldOrigin, FieldSchema, NodeBase, Schema, THirExpr};
+    use pebble_diagnostic::Span;
+
+    /// 一个只有「源 → filter → collect」的程序，filter 的谓词由 `pred` 给出。
+    /// 载荷都很小、不含大写字母：这样编码里出现的标签字节不会被载荷「碰巧」撞上。
+    fn filter_over(pred: THirExpr) -> Hir {
+        let span = Span::new(0, 0);
+        let schema = Schema {
+            fields: vec![FieldSchema {
+                id: 0,
+                name: "x".into(),
+                ty: Type::F64,
+                origin: FieldOrigin::Source {
+                    source: 0,
+                    source_field: "x".into(),
+                },
+            }],
+        };
+        Hir {
+            nodes: vec![
+                HirNode::Source {
+                    base: NodeBase {
+                        id: 0,
+                        inputs: vec![],
+                        output: schema.clone(),
+                        span,
+                    },
+                    source: 0,
+                    kind: SourceKind::Table {
+                        locator: "t.csv".into(),
+                        schema_lock_hash: Hash([0u8; 32]),
+                    },
+                },
+                HirNode::Transform {
+                    base: NodeBase {
+                        id: 1,
+                        inputs: vec![0],
+                        output: schema.clone(),
+                        span,
+                    },
+                    kind: TransformKind::Filter { pred },
+                },
+                HirNode::Terminal {
+                    base: NodeBase {
+                        id: 2,
+                        inputs: vec![1],
+                        output: schema,
+                        span,
+                    },
+                    kind: TerminalKind::Collect,
+                },
+            ],
+            root: 2,
+            semantics_version: crate::SEMANTICS_VERSION.to_string(),
+        }
+    }
+
+    /// `cast(x as i64) > 1`
+    fn cast_predicate() -> THirExpr {
+        let span = Span::new(0, 0);
+        THirExpr::Binary {
+            op: BinOp::Gt,
+            left: Box::new(THirExpr::Cast {
+                expr: Box::new(THirExpr::Field {
+                    field: 0,
+                    ty: Type::F64,
+                    span,
+                }),
+                to: Type::I64,
+                // f64 → i64 可能失败：结果一律可空
+                ty: Type::Opt(Box::new(Type::I64)),
+                span,
+            }),
+            right: Box::new(THirExpr::Literal {
+                value: Literal::Int(1),
+                ty: Type::I64,
+                span,
+            }),
+            ty: Type::Opt(Box::new(Type::Bool)),
+            span,
+        }
+    }
+
+    #[test]
+    fn cast_is_encoded_with_a_tag_no_other_construct_uses() {
+        let with_cast = canonical_bytes(&filter_over(cast_predicate()));
+        let plain = canonical_bytes(&filter_over(THirExpr::Literal {
+            value: Literal::Bool(true),
+            ty: Type::Bool,
+            span: Span::new(0, 0),
+        }));
+        let pos = with_cast
+            .iter()
+            .position(|&b| b == b'V')
+            .expect("cast 应当以 V 编码");
+        // V 之后依次是：目标基础类型（i64）、操作数、结果类型
+        assert_eq!(with_cast[pos + 1], b'i', "V 之后是目标基础类型 i64");
+        // 同一个程序去掉 cast 之后，整份编码里没有 V：这个标签没有别的构造在用
+        assert!(!plain.contains(&b'V'));
+        // 编码是确定的
+        assert_eq!(with_cast, canonical_bytes(&filter_over(cast_predicate())));
+        // 两个程序当然不同
+        assert_ne!(with_cast, plain);
     }
 }

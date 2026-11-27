@@ -104,7 +104,7 @@ MemoryTable("orders") as o
 
 **延期**
 
-- v0.1.1：`having`（先用 agg 后 `filter`）、少量有明确转换矩阵的 `cast`、更多字符串函数、join/distinct/write/print 硬化、完整 Schema 版本仓库。
+- v0.1.1：~~`having`、少量有明确转换矩阵的 `cast`~~（已完成，教程第 11 章）、更多字符串函数、join/distinct/write/print 硬化、完整 Schema 版本仓库。
 - v0.2：Polars 作为第二个外部执行后端，并建立跨后端语义差集与一致性测试矩阵。
 - 更晚：通用 `cast`、全部时间函数、`coalesce/nullif/ifnull`、`substr`、`split`（必须与数组一起）、LaTeX 往返、完整资源配额/沙箱。Cranelift/MLIR 原生后端按 §3.3、§6.4 路线持续推进。
 
@@ -145,7 +145,7 @@ MemoryTable("orders") as o
 
 ### 4.3 文法同步要求
 
-新版 EBNF 至少包含：`extend(recordLiteral)`、`filter(expr)`、`selectItem = expr [as ident]`、`join(..., on = expr)`、全局 agg、可选 having（实现时再启用）、统一尾逗号及正确 ifExpr。旧 `|` 运算符和 Lambda 小节删除。
+新版 EBNF 至少包含：`extend(recordLiteral)`、`filter(expr)`、`selectItem = expr [as ident]`、`join(..., on = expr)`、全局 agg、`having(expr)` 与 `cast(expr as T)`（v0.1.1）、统一尾逗号及正确 ifExpr。旧 `|` 运算符和 Lambda 小节删除。
 
 ---
 
@@ -156,7 +156,7 @@ MemoryTable("orders") as o
 - 除判空测试和逻辑连接词外，普通算术/比较是严格运算：任一输入 null，结果 null；普通比较静态类型为 `?bool`。
 - `x == null` / `x != null` 是独立判空形式，恒返回非空 `bool`，等价 `is_null(x)` / `!is_null(x)`；不得按普通相等解释。
 - 强 Kleene 三值逻辑：`!null=null`；`false && x=false`、`true && x=x`；`true || x=true`、`false || x=x`；其余含空情况按真值表。`&&`/`||` 是严格 null 传播的显式例外。
-- `filter`、join `on`、`if` 条件及未来 `having` 接受 `bool/?bool`；只有 `true` 成立，`false/null` 均不成立。if 只选择条件为 true 的分支。
+- `filter`、`having`、join `on`、`if` 条件及聚合接受 `bool/?bool`；只有 `true` 成立，`false/null` 均不成立。if 只选择条件为 true 的分支。
 
 ### 5.2 值同一性、join、分组与排序
 
@@ -172,7 +172,7 @@ MemoryTable("orders") as o
 - 识别 `f != null`、`!(f == null)`、`!is_null(f)`，先消除括号并解析为稳定字段身份。
 - 合取的非空保证取并集；析取取交集；if 仅当所有可能产生 true 的路径均保证非空时传播。
 - 分析可靠但不完备；无法证明就保持 `?T`，不追求布尔公式完全等价。
-- 收缩只作用于当前 filter（及未来 having）的输出 Schema，不跨 extend/select/join/agg 自动逆向传播。
+- 收缩只作用于当前 filter（及 having）的输出 Schema，不跨 extend/select/join/agg 自动逆向传播。
 
 ### 5.4 部分函数：checked-null，不饱和、不抛用户异常
 
@@ -283,4 +283,9 @@ receipt 记录 manifest hash、实际提交 SQL hash、引擎版本、输入校�
 
 语义阶段（第 9 章）一次报出全部独立的错误；定义失败的名字被毒化，其后果不再重复报告。
 
-下一步（按序）：威胁模型与恶意查询测试集 → 更多语义边界测试（Kleene 反例矩阵、除零/溢出动态用例）→ v0.1.1（having/cast 少量子集）→ M2 证据签名与 verifier 独立化 → M3 Polars 第二后端 → M4 Cranelift/MLIR 原生后端路线推进。
+v0.1.1（2026-11-27，教程第 11 章）：`having` 是语法糖，lowering 成紧跟聚合的 `filter`，HIR 哈希与 `.agg(…).filter(…)` 相同；紧跟聚合的 `filter` 在 SQL 里并进聚合层的 `HAVING`（聚合屏障唯一的例外；HAVING 中的聚合输出引用替换为表达式，不依赖方言的别名引用）。这改变了「聚合后接 filter」的程序生成的 SQL——工件哈希随之改变，HIR 哈希不变。v2 尚未随任何发布固化，所以没有再升版本号；发布之后再发生这种形态改变，必须升版本。
+`cast` 只允许 `i64→f64`、`f64→i64`（取偶取整，越界为 null）、`string→i64`、`string→f64`（严格文法）；可能失败的转换结果一律可空。取值规则的参考实现在 `pebble_semantics::cast`，后端 SQL 用守卫把引擎行为收敛到规范，二者在真实 DuckDB 上逐格对拍。新 HIR 表达式 `Cast` 以新标签 `V` 编码，既有编码不变，旧程序哈希不变。
+同批修复（都是「对的程序编译不过」或「语义差集」）：常量表达式里的内置函数调用被误报为 SEM-016；混合类型的常量除零（`1.5 / 0`）未被诊断；`trim` 沿用 DuckDB 默认行为、不去制表符。
+已知语义差集（未修）：`lower` / `upper` 的三处结果与规范的 Unicode 全映射不一致（DuckDB 实现为简单映射）。消除差集需要在 SQL 里为一百余个特殊码点写守卫，或把规范改为简单映射——属于语言设计决定，待定。
+
+下一步（按序）：威胁模型与恶意查询测试集 → 更多语义边界测试（Kleene 反例矩阵、除零/溢出动态用例）→ v0.1.1 剩余项（字符串函数、join/distinct/write/print 硬化、Schema 版本仓库）与 `lower`/`upper` 差集的决定 → M2 证据签名与 verifier 独立化 → M3 Polars 第二后端 → M4 Cranelift/MLIR 原生后端路线推进。

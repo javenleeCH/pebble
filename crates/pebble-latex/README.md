@@ -4,4 +4,4 @@
 
 边界：LaTeX 是 HIR 的可读视图，不是执行正确性证明，也不读取 BackendArtifact 反推逻辑。保真往返与签名证据工件后置。
 
-状态：已实现 M0 的最小单向导出。
+状态：已实现 M0 的最小单向导出。`having` 在 HIR 里是 `filter`，视图同为 σ；`cast` 写成 `\mathrm{cast}_{目标类型}(x)`（v0.1.1）。

@@ -176,22 +176,28 @@ impl Lowerer<'_> {
                     i += 1;
                 }
                 ast::Op::Filter { pred, span } => {
-                    self.history.push(current_schema.clone());
-                    // 谓词没能解析、或不是 bool：已报告，或是毒化。算子跳过，Schema 不变
-                    if let Some(resolved) = self.resolve_expr(pred, &current_schema, false) {
-                        if self.check_predicate(&resolved).is_some() {
-                            self.const_domain_check(&resolved);
-                            let narrowed = self.narrow(&current_schema, &resolved);
-                            let node_id =
-                                self.push_node(vec![current_id], narrowed, *span, |base| {
-                                    HirNode::Transform {
-                                        base,
-                                        kind: TransformKind::Filter { pred: resolved },
-                                    }
-                                });
-                            current_schema = self.nodes[node_id as usize].base().output.clone();
-                            current_id = node_id;
-                        }
+                    if let Some((node_id, schema)) =
+                        self.lower_filter(current_id, &current_schema, pred, *span)
+                    {
+                        current_schema = schema;
+                        current_id = node_id;
+                    }
+                    i += 1;
+                }
+                ast::Op::Having { pred, span } => {
+                    // having 是语法糖（06 §6.4）：必须紧跟在 agg 之后，然后按与 filter 完全
+                    // 相同的方式 lowering。位置不对时报告并跳过这个算子，后面的检查照常进行。
+                    if !matches!(ops.get(i.wrapping_sub(1)), Some(ast::Op::Agg { .. })) {
+                        self.diags
+                            .error(Code::SemOpPosition, "having 必须紧跟在 agg 之后", *span);
+                        i += 1;
+                        continue;
+                    }
+                    if let Some((node_id, schema)) =
+                        self.lower_filter(current_id, &current_schema, pred, *span)
+                    {
+                        current_schema = schema;
+                        current_id = node_id;
                     }
                     i += 1;
                 }
@@ -552,6 +558,31 @@ impl Lowerer<'_> {
             return None;
         }
         Some(hir)
+    }
+
+    /// filter 的 lowering：解析谓词、检查类型、发射节点；输出 Schema 是非空收缩之后的。
+    /// 谓词解析不出来或不是 bool 时返回 `None`（错误已报告，或是毒化）：算子跳过，Schema 不变。
+    /// `having` 走的是同一个函数——它在语义上就是紧跟 agg 的 filter。
+    fn lower_filter(
+        &mut self,
+        current_id: NodeId,
+        current_schema: &Schema,
+        pred: &ast::Expr,
+        span: Span,
+    ) -> Option<(NodeId, Schema)> {
+        self.history.push(current_schema.clone());
+        let resolved = self.resolve_expr(pred, current_schema, false)?;
+        self.check_predicate(&resolved)?;
+        self.const_domain_check(&resolved);
+        let narrowed = self.narrow(current_schema, &resolved);
+        let node_id = self.push_node(vec![current_id], narrowed, span, |base| {
+            HirNode::Transform {
+                base,
+                kind: TransformKind::Filter { pred: resolved },
+            }
+        });
+        let schema = self.nodes[node_id as usize].base().output.clone();
+        Some((node_id, schema))
     }
 
     // ---------- 源 ----------
@@ -1037,6 +1068,43 @@ impl Lowerer<'_> {
             }
             ast::Expr::Call { name, args, span } => {
                 self.resolve_call(name, args, *span, env, in_join_on)
+            }
+            ast::Expr::Cast { expr, target, span } => {
+                // 操作数不给 null 提供基础类型：cast(null as i64) 的操作数类型无法从目标推出来
+                let inner = self.resolve_expr(expr, env, in_join_on)?;
+                let to = match target {
+                    ast::CastTarget::I64 => Type::I64,
+                    ast::CastTarget::F64 => Type::F64,
+                    ast::CastTarget::Str => Type::Str,
+                };
+                let from = inner.ty().base().clone();
+                // 只有四种转换（04 §4.12）。可能失败的转换，结果一律可空（checked-null）
+                let may_fail = match (&from, &to) {
+                    (Type::I64, Type::F64) => false,
+                    (Type::F64, Type::I64) | (Type::Str, Type::I64) | (Type::Str, Type::F64) => {
+                        true
+                    }
+                    _ => {
+                        self.diags.error_hint(
+                            Code::SemOpUnsupported,
+                            format!("不支持从 {} 转换到 {}", from.render(), to.render()),
+                            *span,
+                            "只支持四种转换：i64 → f64、f64 → i64、string → i64、string → f64",
+                        );
+                        return None;
+                    }
+                };
+                let ty = if may_fail || inner.ty().is_opt() {
+                    Type::Opt(Box::new(to.clone()))
+                } else {
+                    to.clone()
+                };
+                Some(THirExpr::Cast {
+                    expr: Box::new(inner),
+                    to,
+                    ty,
+                    span: *span,
+                })
             }
         }
     }
@@ -1667,7 +1735,7 @@ impl Lowerer<'_> {
             self.const_failed = true;
             self.diags.error_hint(
                 Code::SemConstDomain,
-                "编译期可确定的定义域失败（除零/模零/整数溢出/非有限 f64 结果）",
+                "编译期可确定的定义域失败（除零/模零/整数溢出/非有限 f64 结果/必然失败的 cast）",
                 span,
                 "该表达式是常量且必然失败；请修正常量或改用运行时数据",
             );
@@ -1767,12 +1835,27 @@ fn nn_walk(e: &THirExpr, out: &mut BTreeSet<FieldId>) {
 
 // ---------- 常量定义域求值 ----------
 
+#[derive(Clone, Debug)]
 enum ConstVal {
     Int(i64),
     Float(f64),
     Str(String),
     Bool(bool),
     Null,
+}
+
+/// 混合数值运算的提升规则：一侧是 f64、另一侧是 i64 时，把 i64 按 round-to-nearest, ties-to-even
+/// 转成 f64（与 `cast::i64_to_f64` 同一条规则）。
+fn promote_mixed(l: &ConstVal, r: &ConstVal) -> (ConstVal, ConstVal) {
+    match (l, r) {
+        (ConstVal::Float(_), ConstVal::Int(b)) => {
+            (l.clone(), ConstVal::Float(cast::i64_to_f64(*b)))
+        }
+        (ConstVal::Int(a), ConstVal::Float(_)) => {
+            (ConstVal::Float(cast::i64_to_f64(*a)), r.clone())
+        }
+        _ => (l.clone(), r.clone()),
+    }
 }
 
 /// 求值全常量表达式；Err(span) 表示必然的定义域失败（→ SEM-016）。
@@ -1801,6 +1884,10 @@ fn const_val(e: &THirExpr) -> Result<ConstVal, Span> {
         } => {
             let l = const_val(left)?;
             let r = const_val(right)?;
+            // 混合数值运算先提升到 f64（05 §5.2）。`1.5 / 0` 里的 `0` 是 i64 字面量：
+            // 不提升的话它既不匹配「f64 除以 0.0」也不匹配「i64 除以 0」，这个编译期就能
+            // 确定的除零就被放过去了
+            let (l, r) = promote_mixed(&l, &r);
             Ok(match (op, l, r) {
                 (BinOp::Add, ConstVal::Int(a), ConstVal::Int(b)) => match a.checked_add(b) {
                     Some(v) => ConstVal::Int(v),
@@ -1882,7 +1969,142 @@ fn const_val(e: &THirExpr) -> Result<ConstVal, Span> {
             Ok(ConstVal::Bool(false)) | Ok(ConstVal::Null) => const_val(else_),
             _ => Ok(ConstVal::Null),
         },
-        THirExpr::Call { span, .. } => Err(*span),
+        // 内置函数按规范（04 §4.8）在常量上求值。这里曾经是 `Err(*span)`——把「我不求值」
+        // 当成了「必然失败」，于是 `round(1.5)`、`lower("ABC")` 这类合法的常量表达式全被误报成 SEM-016
+        THirExpr::Call {
+            name, args, span, ..
+        } => {
+            use pebble_hir::BuiltinFn::*;
+            let vals = args.iter().map(const_val).collect::<Result<Vec<_>, _>>()?;
+            // 严格传播：任一参数为 null，结果为 null（is_null 除外）
+            if *name != IsNull && vals.iter().any(|v| matches!(v, ConstVal::Null)) {
+                return Ok(ConstVal::Null);
+            }
+            Ok(match (name, vals.as_slice()) {
+                (IsNull, [v]) => ConstVal::Bool(matches!(v, ConstVal::Null)),
+                (Abs, [ConstVal::Int(a)]) => match a.checked_abs() {
+                    Some(v) => ConstVal::Int(v),
+                    None => return Err(*span), // abs(i64::MIN) 为 null
+                },
+                (Abs, [ConstVal::Float(a)]) => ConstVal::Float(a.abs()),
+                (Round, [ConstVal::Float(a)]) => {
+                    ConstVal::Float(cast::norm_zero(a.round_ties_even()))
+                }
+                (Lower, [ConstVal::Str(s)]) => ConstVal::Str(s.to_lowercase()),
+                (Upper, [ConstVal::Str(s)]) => ConstVal::Str(s.to_uppercase()),
+                (Trim, [ConstVal::Str(s)]) => ConstVal::Str(s.trim().to_string()),
+                (Length, [ConstVal::Str(s)]) => ConstVal::Int(s.chars().count() as i64),
+                (Contains, [ConstVal::Str(a), ConstVal::Str(b)]) => {
+                    ConstVal::Bool(a.contains(b.as_str()))
+                }
+                _ => ConstVal::Null,
+            })
+        }
+        // 受限 cast（07 §7.8）。Err 表示「这个常量 cast 必然失败」→ SEM-016
+        THirExpr::Cast { expr, to, span, .. } => {
+            let v = const_val(expr)?;
+            Ok(match (v, to) {
+                (ConstVal::Null, _) => ConstVal::Null,
+                (ConstVal::Int(a), Type::F64) => ConstVal::Float(a as f64),
+                (ConstVal::Float(x), Type::I64) => match cast::f64_to_i64(x) {
+                    Some(v) => ConstVal::Int(v),
+                    None => return Err(*span),
+                },
+                (ConstVal::Str(s), Type::I64) => match cast::parse_i64_strict(s.as_str()) {
+                    Some(v) => ConstVal::Int(v),
+                    None => return Err(*span),
+                },
+                (ConstVal::Str(s), Type::F64) => match cast::parse_f64_strict(s.as_str()) {
+                    Some(v) => ConstVal::Float(v),
+                    None => return Err(*span),
+                },
+                _ => ConstVal::Null,
+            })
+        }
+    }
+}
+
+/// cast 取值规则的**参考实现**（07 §7.8）。
+///
+/// 常量诊断（SEM-016）用它；测试拿它和真实 DuckDB 上生成的 SQL 对拍。规则写在规范里，
+/// 这里和后端各自实现一遍——规则变了，两边一起改，对拍会告诉你漏了哪一边。
+pub mod cast {
+    /// `i64 → f64`：取最接近的 f64（round-to-nearest, ties-to-even），永不失败。
+    pub fn i64_to_f64(a: i64) -> f64 {
+        norm_zero(a as f64)
+    }
+
+    /// `f64 → i64`：先按 round-to-nearest, ties-to-even 取整，再看是否落在 i64 值域内。
+    pub fn f64_to_i64(x: f64) -> Option<i64> {
+        if !x.is_finite() {
+            return None;
+        }
+        let r = x.round_ties_even();
+        // 2^63 在 f64 里恰好可表示；落在 [-2^63, 2^63) 里即在 i64 值域内
+        if (-9223372036854775808.0..9223372036854775808.0).contains(&r) {
+            Some(r as i64)
+        } else {
+            None
+        }
+    }
+
+    /// `string → i64`：只接受 `[+-]?[0-9]+`（ASCII）。
+    pub fn parse_i64_strict(s: &str) -> Option<i64> {
+        let body = s.strip_prefix(['+', '-']).unwrap_or(s);
+        if body.is_empty() || !body.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        s.parse::<i64>().ok()
+    }
+
+    /// `string → f64`：只接受 ASCII 十进制或科学记数法，结果必须有限。
+    /// 文法：`[+-]?([0-9]+(\.[0-9]*)?|\.[0-9]+)([eE][+-]?[0-9]+)?`
+    pub fn parse_f64_strict(s: &str) -> Option<f64> {
+        let bytes = s.as_bytes();
+        let mut i = 0;
+        if i < bytes.len() && matches!(bytes[i], b'+' | b'-') {
+            i += 1;
+        }
+        let digits = |i: &mut usize| {
+            let start = *i;
+            while *i < bytes.len() && bytes[*i].is_ascii_digit() {
+                *i += 1;
+            }
+            *i > start
+        };
+        let int_digits = digits(&mut i);
+        let mut frac_digits = false;
+        if i < bytes.len() && bytes[i] == b'.' {
+            i += 1;
+            frac_digits = digits(&mut i);
+        }
+        // 小数点前后至少一边有数字
+        if !int_digits && !frac_digits {
+            return None;
+        }
+        if i < bytes.len() && matches!(bytes[i], b'e' | b'E') {
+            i += 1;
+            if i < bytes.len() && matches!(bytes[i], b'+' | b'-') {
+                i += 1;
+            }
+            if !digits(&mut i) {
+                return None;
+            }
+        }
+        if i != bytes.len() {
+            return None;
+        }
+        let v = s.parse::<f64>().ok()?;
+        if v.is_finite() {
+            Some(norm_zero(v))
+        } else {
+            None
+        }
+    }
+
+    /// 把零规范化为 +0.0（05 §5.1：±0 表示同一个 Pebble 数值）。
+    pub fn norm_zero(v: f64) -> f64 {
+        if v == 0.0 { 0.0 } else { v }
     }
 }
 
@@ -2480,5 +2702,330 @@ MemoryTable("orders") as o
     fn valid_programs_are_unaffected_by_the_recovery_machinery() {
         let hir = compile_ok(M0);
         assert!(hir.validate().is_ok());
+    }
+
+    // ---------- 第 11 章：having 与 cast ----------
+
+    /// 流水线最后一级的输出字段：(名字, 类型)。`base` 是接在源后面的那一段算子。
+    fn output_types(src: &str) -> Vec<(String, String)> {
+        let hir = compile_ok(src);
+        let last = hir.nodes[hir.root as usize].base().inputs[0];
+        hir.nodes[last as usize]
+            .base()
+            .output
+            .fields
+            .iter()
+            .map(|f| (f.name.clone(), f.ty.render()))
+            .collect()
+    }
+
+    fn with_orders(expr: &str) -> String {
+        format!("MemoryTable(\"orders\") as o\n  .extend({{ x = {expr} }})\n  .collect()\n")
+    }
+
+    #[test]
+    fn cast_reference_implementation_follows_the_spec() {
+        use cast::*;
+        // i64 → f64：取最接近的 f64，永不失败
+        assert!(i64_to_f64(0).is_sign_positive(), "0 规范化为 +0.0");
+        assert_eq!(
+            i64_to_f64(9007199254740993),
+            9007199254740992.0,
+            "2^53 + 1 取偶到 2^53"
+        );
+        assert_eq!(i64_to_f64(i64::MIN), -9223372036854775808.0);
+        assert_eq!(
+            i64_to_f64(i64::MAX),
+            9223372036854775808.0,
+            "i64::MAX 取最接近的 2^63"
+        );
+
+        // f64 → i64：先按取偶取整，再查值域
+        for (x, want) in [
+            (2.5, 2),
+            (-2.5, -2),
+            (0.5, 0),
+            (-0.5, 0),
+            (1.5, 2),
+            (-1.5, -2),
+            (0.49999999999999994, 0),
+            (-0.4, 0),
+            (3.7, 4),
+            (-3.7, -4),
+            (9223372036854774784.0, 9223372036854774784),
+            (-9223372036854775808.0, -9223372036854775808),
+        ] {
+            assert_eq!(f64_to_i64(x), Some(want), "f64_to_i64({x})");
+        }
+        for x in [
+            9223372036854775808.0,
+            -9223372036854777856.0,
+            1e300,
+            f64::NAN,
+            f64::INFINITY,
+        ] {
+            assert_eq!(f64_to_i64(x), None, "f64_to_i64({x}) 应当越界");
+        }
+
+        // string → i64：只接受 [+-]?[0-9]+
+        for (s, want) in [
+            ("1", Some(1)),
+            ("+5", Some(5)),
+            ("-0", Some(0)),
+            ("007", Some(7)),
+            ("9223372036854775807", Some(i64::MAX)),
+            ("-9223372036854775808", Some(i64::MIN)),
+        ] {
+            assert_eq!(parse_i64_strict(s), want, "parse_i64_strict({s:?})");
+        }
+        for s in [
+            " 1",
+            "1 ",
+            "1_000",
+            "0x10",
+            "1.",
+            ".5",
+            "1e3",
+            "1.0",
+            "9223372036854775808",
+            "-9223372036854775809",
+            "",
+            "+",
+            "-",
+            "１２",
+            "abc",
+        ] {
+            assert_eq!(
+                parse_i64_strict(s),
+                None,
+                "parse_i64_strict({s:?}) 应当失败"
+            );
+        }
+
+        // string → f64：十进制或科学记数法，结果必须有限
+        for (s, want) in [
+            ("1", 1.0),
+            ("+5", 5.0),
+            ("1.", 1.0),
+            (".5", 0.5),
+            ("1e3", 1000.0),
+            ("1E+05", 100000.0),
+            ("-.5e-2", -0.005),
+            ("1e-400", 0.0),
+            ("0.1", 0.1),
+        ] {
+            assert_eq!(parse_f64_strict(s), Some(want), "parse_f64_strict({s:?})");
+        }
+        assert!(
+            parse_f64_strict("-0").unwrap().is_sign_positive(),
+            "-0 规范化为 +0.0"
+        );
+        assert_eq!(parse_f64_strict("1.7976931348623157e308"), Some(f64::MAX));
+        for s in [
+            "1e400",
+            "1.7976931348623159e308",
+            "inf",
+            "nan",
+            "Infinity",
+            "-inf",
+            "1_000",
+            " 1",
+            "1 ",
+            "",
+            ".",
+            "e5",
+            "1e",
+            "1e+",
+            "1.2.3",
+            "0x10",
+            "１",
+        ] {
+            assert_eq!(
+                parse_f64_strict(s),
+                None,
+                "parse_f64_strict({s:?}) 应当失败"
+            );
+        }
+    }
+
+    #[test]
+    fn cast_typing_follows_checked_null() {
+        let src = "MemoryTable(\"orders\") as o\n  .extend({\n    a = cast(1 as f64),\n    b = cast(o.amount as f64),\n    c = cast(1.5 as i64),\n    d = cast(\"1\" as i64),\n    e = cast(o.status as f64),\n  })\n  .select(a, b, c, d, e)\n  .collect()\n";
+        assert_eq!(
+            output_types(src),
+            vec![
+                ("a".into(), "f64".to_string()),  // i64 → f64 永不失败：保持非空
+                ("b".into(), "?f64".to_string()), // 操作数可空 → 结果可空
+                ("c".into(), "?i64".to_string()), // 可能失败的转换：操作数非空，结果也可空
+                ("d".into(), "?i64".to_string()),
+                ("e".into(), "?f64".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn cast_rejects_everything_outside_the_four_conversions() {
+        for (expr, what) in [
+            ("cast(true as i64)", "bool 参与转换"),
+            ("cast(1 as string)", "数值 → string"),
+            ("cast(1.5 as string)", "f64 → string"),
+            ("cast(o.status as string)", "相同类型"),
+            ("cast(o.amount as i64)", "相同类型（可空）"),
+        ] {
+            let src = with_orders(expr);
+            assert_eq!(codes(&src), ["SEM-003"], "{what}: {expr}");
+            let bag = compile_err(&src, "SEM-003");
+            assert!(
+                bag.diags
+                    .iter()
+                    .any(|d| d.hint.as_deref().is_some_and(|h| h.contains("四种转换"))),
+                "{what}：应当提示只支持哪四种转换"
+            );
+        }
+    }
+
+    #[test]
+    fn a_bare_null_has_no_operand_type_for_cast() {
+        assert_eq!(codes(&with_orders("cast(null as i64)")), ["SEM-008"]);
+    }
+
+    #[test]
+    fn constant_casts_are_diagnosed_only_when_they_certainly_fail() {
+        // 必然失败的常量 cast：SEM-016
+        for expr in [
+            "cast(\"abc\" as i64)",
+            "cast(\" 1\" as i64)",
+            "cast(\"1.0\" as i64)",
+            "cast(\"9223372036854775808\" as i64)",
+            "cast(\"1e400\" as f64)",
+            "cast(\"inf\" as f64)",
+            "cast(1000000000000000000000.0 as i64)",
+            "cast(9223372036854775808.0 as i64)",
+        ] {
+            assert_eq!(codes(&with_orders(expr)), ["SEM-016"], "{expr}");
+        }
+        // 成功的常量 cast：不报错
+        for expr in [
+            "cast(2.5 as i64)",
+            "cast(-2.5 as i64)",
+            "cast(\"12\" as i64)",
+            "cast(\"1e3\" as f64)",
+            "cast(\"1e-400\" as f64)",
+            "cast(9007199254740993 as f64)",
+            "cast(0.49999999999999994 as i64)",
+            "cast(\"-0\" as f64)",
+        ] {
+            compile_ok(&with_orders(expr));
+        }
+    }
+
+    #[test]
+    fn constant_builtin_calls_are_no_longer_misreported_as_domain_failures() {
+        // 以前：常量里的内置函数调用一律被当成「必然失败」，下面这些合法程序全都编译不过
+        for expr in [
+            "round(1.5)",
+            "round(2.5)",
+            "abs(-3)",
+            "abs(-3.5)",
+            "lower(\"ABC\")",
+            "upper(\"abc\")",
+            "trim(\"  x  \")",
+            "length(\"héllo\")",
+            "contains(\"abc\", \"b\")",
+            "is_null(1)",
+            "round(2.5) + abs(-3) + length(lower(\"ABC\"))",
+        ] {
+            compile_ok(&with_orders(expr));
+        }
+        // 真正的常量定义域失败仍然要报
+        for expr in [
+            "abs(0 - 9223372036854775807 - 1)", // abs(i64::MIN)
+            "round(1.5) / 0",
+            // 混合类型：0 是 i64 字面量，先提升到 f64 再判断
+            "1.5 / 0",
+            "1 % 0.0",
+            "1 % (length(\"ab\") - 2)",
+        ] {
+            assert_eq!(codes(&with_orders(expr)), ["SEM-016"], "{expr}");
+        }
+    }
+
+    #[test]
+    fn having_is_sugar_for_filter_after_agg() {
+        let head = "MemoryTable(\"orders\") as o\n  .group_by(o.status)\n  .agg(n = count(), total = sum(o.amount))\n";
+        let tail =
+            "  .{op}(total > 100 && n >= 2)\n  .select(status, n)\n  .sort(n desc)\n  .collect()\n";
+        let h = compile_ok(&format!("{head}{}", tail.replace("{op}", "having")));
+        let f = compile_ok(&format!("{head}{}", tail.replace("{op}", "filter")));
+        assert_eq!(
+            hir_hash(&h),
+            hir_hash(&f),
+            "having 与紧跟 agg 的 filter 是同一个 HIR——语义等价的机器证据"
+        );
+    }
+
+    #[test]
+    fn having_must_directly_follow_agg() {
+        let head = "MemoryTable(\"orders\") as o\n";
+        assert_eq!(
+            codes(&format!("{head}  .having(o.amount > 1)\n  .collect()\n")),
+            ["SEM-005"]
+        );
+        // 中间隔了别的算子也不行
+        assert_eq!(
+            codes(&format!(
+                "{head}  .agg(n = count())\n  .select(n)\n  .having(n > 1)\n  .collect()\n"
+            )),
+            ["SEM-005"]
+        );
+        // 全局聚合之后可以
+        compile_ok(&format!(
+            "{head}  .agg(n = count())\n  .having(n > 1)\n  .collect()\n"
+        ));
+        // 位置不对时报错并跳过，后面的错误照常报（第 9 章）
+        assert_eq!(
+            codes(&format!(
+                "{head}  .filter(o.amount > 1)\n  .having(o.amount > 1)\n  .filter(o.nope > 1)\n  .collect()\n"
+            )),
+            ["SEM-005", "SEM-001"]
+        );
+    }
+
+    #[test]
+    fn having_checks_its_predicate_exactly_like_filter() {
+        let head = "MemoryTable(\"orders\") as o\n";
+        // 不是 bool：SEM-010
+        assert_eq!(
+            codes(&format!(
+                "{head}  .agg(n = count())\n  .having(n)\n  .collect()\n"
+            )),
+            ["SEM-010"]
+        );
+        // 只看得见聚合的输出：输入行字段超出作用域（SEM-012）
+        assert_eq!(
+            codes(&format!(
+                "{head}  .group_by(o.status)\n  .agg(n = count())\n  .having(o.amount > 1)\n  .collect()\n"
+            )),
+            ["SEM-012"]
+        );
+        // 谓词整体是常量且必然失败：照常诊断（非常量里的 1/0 留给运行时 checked-null）
+        assert_eq!(
+            codes(&format!(
+                "{head}  .agg(n = count())\n  .having(1 / 0 > 0)\n  .collect()\n"
+            )),
+            ["SEM-016"]
+        );
+        // 非空收缩与 filter 相同：having(amount != null) 之后，分组键 amount 从 ?i64 收缩为 i64。
+        // （聚合之后要用裸名字引用分组键：带别名的 o.amount 指向输入行字段，已超出作用域）
+        let src = format!(
+            "{head}  .group_by(o.amount)\n  .agg(n = count())\n  .having(amount != null)\n  .select(amount, n)\n  .collect()\n"
+        );
+        assert_eq!(
+            output_types(&src),
+            vec![
+                ("amount".into(), "i64".to_string()),
+                ("n".into(), "i64".to_string())
+            ]
+        );
     }
 }

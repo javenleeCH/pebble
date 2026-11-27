@@ -107,6 +107,8 @@ cargo run -p pebble-driver -- build examples/pardemo.pebble --locks tests/locks
 Remove-Item examples/pardemo.pebble
 ```
 
+第 11 章给文法加了两个产生式：算子 `having(pred)` 与表达式 `cast(expr as T)`。后者的参数形式 `expr as 类型` 与普通调用不同，需要单独的解析函数——它是「给文法加一个产生式」的完整范例，见[第 11 章](ch11-having与cast.md)。
+
 ## 练习
 
 1. **把 `else if` 展开画出来**：手写 `if a {x} else if b {y} else {z}` 脱糖后的嵌套 If 树（画在纸上），对照 `parse_if_body` 的递归。

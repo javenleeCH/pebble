@@ -1,0 +1,25 @@
+{
+  "lock_version": 1,
+  "source": {
+    "kind": "table",
+    "locator": "tests/data/casts.csv"
+  },
+  "fields": [
+    {
+      "name": "s",
+      "type": "str",
+      "optional": false
+    },
+    {
+      "name": "x",
+      "type": "f64",
+      "optional": true
+    },
+    {
+      "name": "n",
+      "type": "i64",
+      "optional": true
+    }
+  ],
+  "schema_hash": "sha256:a59f23b382fbd4e47bd8242c4e341f742c321a2c38f623ad2c58cae4a3d3c311"
+}

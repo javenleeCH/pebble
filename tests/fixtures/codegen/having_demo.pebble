@@ -1,0 +1,8 @@
+// 第 11 章演示：having 并进聚合层的 HAVING
+Table("tests/data/orders.csv") as o
+  .group_by(o.customer_id)
+  .agg(n = count(), total = sum(o.amount))
+  .having(total > 1000 && n >= 2)
+  .select(customer_id, n, total)
+  .sort(customer_id)
+  .collect()

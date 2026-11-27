@@ -28,6 +28,8 @@
 | f64 非有限结果 → null | `1e308*10` → inf | 必须 isfinite 检查 |
 | `-0.0` 规范化为 `+0.0` | 保留 -0.0 | 必须规范化 |
 | `round` ties-to-even | DuckDB 四舍五入进位 | 必须手写公式 |
+| `trim` 去除两端 Unicode White_Space | 默认的 `trim` 不去制表符 | 显式给出全部 25 个码点（第 11 章） |
+| `cast` 的四种转换 | 接受空白、下划线、`inf`；`f64→i64` 进位且越界报错 | 先用守卫收敛到规范，再取值（第 11 章） |
 | sort 全键 nulls last | 默认 nulls last…但 asc/desc 语义有方言差异 | 显式写 `NULLS LAST` |
 
 规则很简单：**DuckDB 的每个默认值都要审**。碰巧一致的（`AND`/`OR` 恰是 Kleene、聚合跳过 null、`GROUP BY` null 同组）可以直用，但要在测试里钉住——「碰巧对」不写测试，下次升级就变「悄悄错」。
@@ -65,16 +67,18 @@ CASE WHEN NOT isfinite((e)) THEN NULL ELSE ((e) + 0.0) END
 
 **3）round ties-to-even：SQL 里没有的东西自己拼**
 
-DuckDB 的 `round(2.5) = 3`，Pebble 承诺 `round(2.5) = 2`。手写：
+DuckDB 的 `round(2.5) = 3`，Pebble 承诺 `round(2.5) = 2`。手写（与实现生成的 SQL 一致，只把 `x` 简写了）：
 
 ```text
-CASE WHEN frac(x) < 0.5 THEN FLOOR(x)          -- 远离 .5：直接取
-     WHEN frac(x) > 0.5 THEN FLOOR(x) + 1
-     WHEN MOD(CAST(FLOOR(x) AS BIGINT), 2) = 0 THEN FLOOR(x)   -- 恰在 .5：取偶
-     ELSE FLOOR(x) + 1 END
+CASE WHEN ((x) - FLOOR((x))) < 0.5 THEN FLOOR((x)) + 0.0        -- 离 .5 远：直接取
+     WHEN ((x) - FLOOR((x))) > 0.5 THEN FLOOR((x)) + 1.0
+     WHEN MOD(CAST(FLOOR((x)) AS BIGINT), 2) = 0 THEN FLOOR((x)) + 0.0   -- 恰在 .5：取偶
+     ELSE FLOOR((x)) + 1.0 END
 ```
 
-注意第三行安全的边界条件：`frac = 0.5` 只可能出现在 `|x| < 2^53`（再大的浮点没有小数部分），所以 `CAST(FLOOR(x) AS BIGINT)` 不会溢出——**每个守卫都要自证安全性**，这条推论写进了 crate 文档。
+小数部分写成 `(x) - FLOOR(x)` 有两个原因。其一，DuckDB 1.4 里没有 `frac` 这个函数——本节的示意曾经写成 `frac(x)`，与实现不一致，是第 11 章把 `round` 的结果放到真实 DuckDB 上验证时发现的。其二，也不能图省事写成 `x - TRUNC(x)`：负数的小数部分会变成负的（`-1.2 - (-1) = -0.2`），第一行 `< 0.5` 就会误判，`round(-1.2)` 得到 -2。用 `FLOOR` 时小数部分始终落在 `[0, 1)`，公式对正负数一视同仁：`round(-1.2) = -1`，`round(-2.5) = -2`。
+
+注意第三行安全的边界条件：小数部分等于 0.5 只可能出现在 `|x| < 2^53`（再大的浮点没有小数部分），所以 `CAST(FLOOR(x) AS BIGINT)` 不会溢出——**每个守卫都要自证安全性**，这条推论写进了 crate 文档。
 
 ## 表达式膨胀：守卫的代价
 

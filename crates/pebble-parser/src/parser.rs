@@ -19,7 +19,7 @@ use crate::lexer::{Tok, Token};
 use pebble_diagnostic::{Code, DiagBag, Span};
 
 const OPERATORS: &[&str] = &[
-    "filter", "extend", "select", "distinct", "sort", "take", "join", "group_by", "agg",
+    "filter", "extend", "select", "distinct", "sort", "take", "join", "group_by", "agg", "having",
 ];
 const TERMINALS: &[&str] = &["write", "collect", "print"];
 const AGG_FNS: &[&str] = &["count", "sum", "min", "max", "avg"];
@@ -797,14 +797,17 @@ impl Parser<'_> {
         }
         let opened = format!(".{name}(");
         let op = match name {
-            "filter" => {
+            // having 与 filter 的参数形式相同：一个谓词表达式
+            "filter" | "having" => {
                 let pred = self.parse_expr()?;
                 if !self.expect_close(&opened, Arity::One) {
                     return None;
                 }
-                Op::Filter {
-                    pred,
-                    span: start.merge(self.last_span()),
+                let span = start.merge(self.last_span());
+                if name == "filter" {
+                    Op::Filter { pred, span }
+                } else {
+                    Op::Having { pred, span }
                 }
             }
             "extend" => {
@@ -1391,6 +1394,8 @@ impl Parser<'_> {
                     Some(Expr::Literal(Literal::Null, span))
                 }
                 "if" => self.parse_if(),
+                // cast 的参数形式是 `expr as 类型`，与普通调用不同，单独解析
+                "cast" => self.parse_cast(),
                 _ => {
                     self.advance();
                     // 函数调用：ident "(" ... ")"
@@ -1437,6 +1442,72 @@ impl Parser<'_> {
                 None
             }
         }
+    }
+
+    /// `cast(expr as T)`（04 §4.12）。与 `parse_if` 相同的约定：调用前 `cast` 关键字
+    /// 已由 parse_primary 分派但**未消费**，这里先消费它。
+    ///
+    /// 目标类型只有三个，在语法层就限死：写成别的名字不是「类型不匹配」的语义问题，
+    /// 而是这句话根本不是合法的 cast。后面没跟 `(` 的 `cast` 是一个普通的字段引用。
+    fn parse_cast(&mut self) -> Option<Expr> {
+        let start = self.peek_span();
+        self.advance(); // 消费 "cast"
+        if *self.peek() != Tok::LParen {
+            return Some(Expr::Field {
+                alias: None,
+                name: "cast".to_string(),
+                span: start,
+            });
+        }
+        self.advance(); // (
+        let inner = self.parse_expr()?;
+        if !self.accept_kw("as") {
+            if !self.eat_hole() {
+                let got = describe(self.peek());
+                self.fail_hint(
+                    Code::ParUnexpected,
+                    format!("cast 的 `as` 之前应当是一个写完整的表达式，遇到 {got}"),
+                    "写法：`cast(表达式 as 类型)`，类型只能是 i64 / f64 / string",
+                );
+            }
+            return None;
+        }
+        let target = match self.peek().clone() {
+            Tok::Ident(name) => {
+                self.advance();
+                match name.as_str() {
+                    "i64" => CastTarget::I64,
+                    "f64" => CastTarget::F64,
+                    "string" => CastTarget::Str,
+                    other => {
+                        self.fail_spanned(
+                            Code::ParUnexpected,
+                            format!("cast 的目标类型 `{other}` 不在允许的范围里"),
+                            self.last_span(),
+                            Some("类型只能是 i64 / f64 / string"),
+                        );
+                        return None;
+                    }
+                }
+            }
+            other => {
+                let got = describe(&other);
+                self.fail_hint(
+                    Code::ParUnexpected,
+                    format!("cast 的 `as` 之后应当是类型名，遇到 {got}"),
+                    "类型只能是 i64 / f64 / string",
+                );
+                return None;
+            }
+        };
+        if !self.expect_punct(&Tok::RParen, "`)`") {
+            return None;
+        }
+        Some(Expr::Cast {
+            expr: Box::new(inner),
+            target,
+            span: start.merge(self.last_span()),
+        })
     }
 
     /// `if c { a } [else if c2 { b }] ... else { z }` → 嵌套单条件 If。

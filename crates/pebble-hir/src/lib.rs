@@ -240,6 +240,15 @@ pub enum THirExpr {
         ty: Type,
         span: Span,
     },
+    /// 受限显式转换 `cast(expr as T)`（v0.1.1，04 §4.12）。
+    /// `to` 是目标**基础**类型（i64 / f64 / string）；结果的可空性在 `ty` 里：
+    /// 可能失败的转换即使操作数非空，结果也是可空的（checked-null）。
+    Cast {
+        expr: Box<THirExpr>,
+        to: Type,
+        ty: Type,
+        span: Span,
+    },
 }
 
 impl THirExpr {
@@ -250,7 +259,8 @@ impl THirExpr {
             | THirExpr::Binary { ty, .. }
             | THirExpr::Unary { ty, .. }
             | THirExpr::If { ty, .. }
-            | THirExpr::Call { ty, .. } => ty,
+            | THirExpr::Call { ty, .. }
+            | THirExpr::Cast { ty, .. } => ty,
         }
     }
 
@@ -261,7 +271,8 @@ impl THirExpr {
             | THirExpr::Binary { span, .. }
             | THirExpr::Unary { span, .. }
             | THirExpr::If { span, .. }
-            | THirExpr::Call { span, .. } => *span,
+            | THirExpr::Call { span, .. }
+            | THirExpr::Cast { span, .. } => *span,
         }
     }
 
@@ -278,6 +289,7 @@ impl THirExpr {
                 ..
             } => condition.is_const() && then.is_const() && else_.is_const(),
             THirExpr::Call { args, .. } => args.iter().all(|a| a.is_const()),
+            THirExpr::Cast { expr, .. } => expr.is_const(),
         }
     }
 }

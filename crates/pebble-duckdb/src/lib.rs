@@ -18,7 +18,7 @@ use pebble_hir::{
     BackendArtifact, BinOp, BuiltinFn, Hir, HirNode, Literal, SchemaLock, SourceKind, THirExpr,
     TransformKind, Type, UnaryOp,
 };
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
 const I64_MIN: &str = "-9223372036854775808";
@@ -203,7 +203,22 @@ impl Codegen<'_> {
         let input_ids = self.output_ids(base.inputs[0]);
         match kind {
             TransformKind::Filter { pred } => {
-                let pred_sql = self.emit_expr(pred);
+                // 聚合层是屏障的唯一例外：紧跟其后的 filter 是「对分组结果过滤」，并进它的 HAVING。
+                // 论证：对外层关系（每个分组一行）做 WHERE，与对分组做 HAVING，保留的是同一批分组
+                let mut into_having = false;
+                if let Some(b) = open.as_mut() {
+                    if b.group_by.is_some() {
+                        let env = EmitEnv {
+                            subst: b.subst.clone(),
+                        };
+                        b.having.push(self.emit_expr(pred, &env));
+                        into_having = true;
+                    }
+                }
+                if into_having {
+                    return Ok(());
+                }
+                let pred_sql = self.emit_expr(pred, &NO_SUBST);
                 // 能并进当前的 WHERE 吗？谓词引用的列必须都直接来自这一层的 FROM。
                 // 引用了本层选择列表里新算出来的列就不行：标准 SQL 的 WHERE 看不到同一个 SELECT 里的别名。
                 //（DuckDB 其实允许这种引用——那是它的方言扩展。不依赖它：生成的 SQL 只建立在标准语义上。）
@@ -226,7 +241,7 @@ impl Codegen<'_> {
                     if input_ids.contains(&f.id) {
                         items.push((f.id, None));
                     } else if let Some(b) = bindings.iter().find(|b| b.output == f.id) {
-                        items.push((f.id, Some(self.emit_expr(&b.value))));
+                        items.push((f.id, Some(self.emit_expr(&b.value, &NO_SUBST))));
                     } else {
                         return Err(format!("extend 输出字段 f{} 无来源", f.id));
                     }
@@ -240,7 +255,7 @@ impl Codegen<'_> {
                         THirExpr::Field { field, .. } if *field == p.output => {
                             items.push((p.output, None));
                         }
-                        _ => items.push((p.output, Some(self.emit_expr(&p.expr)))),
+                        _ => items.push((p.output, Some(self.emit_expr(&p.expr, &NO_SUBST)))),
                     }
                 }
                 self.project(me, base, items, sql, open)?;
@@ -257,7 +272,7 @@ impl Codegen<'_> {
                 for k in keys {
                     order.push(format!(
                         "{} {} NULLS LAST",
-                        self.emit_expr(&k.expr),
+                        self.emit_expr(&k.expr, &NO_SUBST),
                         if k.descending { "DESC" } else { "ASC" }
                     ));
                 }
@@ -287,7 +302,7 @@ impl Codegen<'_> {
                 // join 开新的一层，但不是屏障：后面的 filter / extend / select 可以并进来
                 *open = Some(Block::passthrough(me, from, from_ids).with_join(
                     right,
-                    self.emit_expr(on),
+                    self.emit_expr(on, &NO_SUBST),
                     input_ids,
                 ));
             }
@@ -330,8 +345,11 @@ impl Codegen<'_> {
         Ok(())
     }
 
-    /// 聚合层：`SELECT <键> AS fN, <聚合> AS fN FROM (内层) [GROUP BY <键>]`。
-    /// 聚合是屏障：它后面的 filter 若并进 WHERE，就跑到了分组前面——那是 having，不是 filter。
+    /// 聚合层：`SELECT <键> AS fN, <聚合> AS fN FROM (内层) [GROUP BY <键>] [HAVING …]`。
+    ///
+    /// 聚合层是屏障：它后面的 filter 不能并进 WHERE——那就跑到了分组前面。
+    /// 例外是紧跟其后的 filter（即 having），它并进 HAVING（见 `lower_transform`）。
+    /// `subst` 记下每个输出字段的表达式，发射 HAVING 时用它替换字段引用。
     fn aggregate_block(
         &self,
         me: pebble_hir::NodeId,
@@ -342,22 +360,23 @@ impl Codegen<'_> {
     ) -> Block {
         let mut select = Vec::new();
         let mut group_by = Vec::new();
+        let mut subst = BTreeMap::new();
         for k in group_keys {
-            let key_sql = self.emit_expr(&k.value);
+            let key_sql = self.emit_expr(&k.value, &NO_SUBST);
             select.push(format!("{} AS \"f{}\"", key_sql, k.output));
-            group_by.push(key_sql);
+            group_by.push(key_sql.clone());
+            subst.insert(k.output, key_sql);
         }
         for b in bindings {
-            select.push(format!(
-                "{} AS \"f{}\"",
-                self.emit_agg_call(&b.call),
-                b.output
-            ));
+            let call_sql = self.emit_agg_call(&b.call, &NO_SUBST);
+            select.push(format!("{} AS \"f{}\"", call_sql, b.output));
+            subst.insert(b.output, call_sql);
         }
         Block {
             select,
             projected: true,
             group_by: Some(group_by),
+            subst,
             barrier: true,
             ..Block::passthrough(me, from, from_ids)
         }
@@ -426,15 +445,15 @@ impl Codegen<'_> {
         ))
     }
 
-    fn emit_agg_call(&self, call: &pebble_hir::AggCallH) -> String {
+    fn emit_agg_call(&self, call: &pebble_hir::AggCallH, env: &EmitEnv) -> String {
         use pebble_hir::AggFunc::*;
         match call.func {
             Count => match &call.arg {
                 None => "COUNT(*)".to_string(),
-                Some(a) => format!("COUNT({})", self.emit_expr(a)),
+                Some(a) => format!("COUNT({})", self.emit_expr(a, env)),
             },
             Sum => {
-                let x = self.emit_expr(call.arg.as_ref().expect("arity 已校验"));
+                let x = self.emit_expr(call.arg.as_ref().expect("arity 已校验"), env);
                 match call.arg.as_ref().unwrap().ty().base() {
                     Type::I64 => {
                         let s = format!("SUM(CAST(({}) AS HUGEINT))", x);
@@ -450,7 +469,7 @@ impl Codegen<'_> {
                 }
             }
             Min | Max => {
-                let x = self.emit_expr(call.arg.as_ref().expect("arity 已校验"));
+                let x = self.emit_expr(call.arg.as_ref().expect("arity 已校验"), env);
                 let m = if matches!(call.func, Min) {
                     format!("MIN({})", x)
                 } else {
@@ -463,7 +482,7 @@ impl Codegen<'_> {
             }
             Avg => {
                 let a = call.arg.as_ref().expect("arity 已校验");
-                let x = self.emit_expr(a);
+                let x = self.emit_expr(a, env);
                 let raw = match a.ty().base() {
                     Type::I64 => format!("(SUM(CAST(({}) AS DOUBLE))) / (COUNT({}))", x, x),
                     _ => format!("(SUM({})) / (COUNT({}))", x, x),
@@ -488,7 +507,7 @@ impl Codegen<'_> {
 
     // ---------- 表达式 ----------
 
-    fn emit_expr(&self, e: &THirExpr) -> String {
+    fn emit_expr(&self, e: &THirExpr, env: &EmitEnv) -> String {
         match e {
             THirExpr::Literal { value, ty, .. } => match value {
                 Literal::Int(v) => v.to_string(),
@@ -497,15 +516,20 @@ impl Codegen<'_> {
                 Literal::Bool(b) => if *b { "TRUE" } else { "FALSE" }.to_string(),
                 Literal::Null => format!("CAST(NULL AS {})", sql_type(ty.base())),
             },
-            THirExpr::Field { field, .. } => format!("\"f{}\"", field),
+            THirExpr::Field { field, .. } => match env.subst.get(field) {
+                // HAVING 里引用聚合的输出：换成它的表达式。标准 SQL 的 HAVING 看不到选择列表的别名
+                Some(sql) => sql.clone(),
+                None => format!("\"f{}\"", field),
+            },
+            THirExpr::Cast { expr, to, .. } => self.emit_cast(expr, to, env),
             THirExpr::Binary {
                 op,
                 left,
                 right,
                 ty,
                 ..
-            } => self.emit_binary(*op, left, right, ty),
-            THirExpr::Unary { op, expr, ty, .. } => self.emit_unary(*op, expr, ty),
+            } => self.emit_binary(*op, left, right, ty, env),
+            THirExpr::Unary { op, expr, ty, .. } => self.emit_unary(*op, expr, ty, env),
             THirExpr::If {
                 condition,
                 then,
@@ -513,26 +537,33 @@ impl Codegen<'_> {
                 ..
             } => format!(
                 "CASE WHEN ({}) THEN ({}) ELSE ({}) END",
-                self.emit_expr(condition),
-                self.emit_expr(then),
-                self.emit_expr(else_)
+                self.emit_expr(condition, env),
+                self.emit_expr(then, env),
+                self.emit_expr(else_, env)
             ),
-            THirExpr::Call { name, args, .. } => self.emit_call(*name, args),
+            THirExpr::Call { name, args, .. } => self.emit_call(*name, args, env),
         }
     }
 
-    fn emit_binary(&self, op: BinOp, left: &THirExpr, right: &THirExpr, _ty: &Type) -> String {
+    fn emit_binary(
+        &self,
+        op: BinOp,
+        left: &THirExpr,
+        right: &THirExpr,
+        _ty: &Type,
+        env: &EmitEnv,
+    ) -> String {
         use BinOp::*;
         match op {
             And => format!(
                 "(({}) AND ({}))",
-                self.emit_expr(left),
-                self.emit_expr(right)
+                self.emit_expr(left, env),
+                self.emit_expr(right, env)
             ),
             Or => format!(
                 "(({}) OR ({}))",
-                self.emit_expr(left),
-                self.emit_expr(right)
+                self.emit_expr(left, env),
+                self.emit_expr(right, env)
             ),
             Eq | Neq | Gt | Lt | Gte | Lte => {
                 let o = match op {
@@ -546,9 +577,9 @@ impl Codegen<'_> {
                 };
                 format!(
                     "(({}) {} ({}))",
-                    self.emit_expr(left),
+                    self.emit_expr(left, env),
                     o,
-                    self.emit_expr(right)
+                    self.emit_expr(right, env)
                 )
             }
             Add | Sub | Mul | Div | Mod => {
@@ -558,15 +589,15 @@ impl Codegen<'_> {
                     // 字符串拼接（严格传播 null）
                     return format!(
                         "(({}) || ({}))",
-                        self.emit_expr(left),
-                        self.emit_expr(right)
+                        self.emit_expr(left, env),
+                        self.emit_expr(right, env)
                     );
                 }
                 if matches!(lb, Type::I64) && matches!(rb, Type::I64) {
-                    self.emit_int_arith(op, &self.emit_expr(left), &self.emit_expr(right))
+                    self.emit_int_arith(op, &self.emit_expr(left, env), &self.emit_expr(right, env))
                 } else {
-                    let l = cast_f64(&self.emit_expr(left), lb);
-                    let r = cast_f64(&self.emit_expr(right), rb);
+                    let l = cast_f64(&self.emit_expr(left, env), lb);
+                    let r = cast_f64(&self.emit_expr(right, env), rb);
                     self.emit_f64_arith(op, &l, &r)
                 }
             }
@@ -637,7 +668,7 @@ impl Codegen<'_> {
         }
     }
 
-    fn emit_unary(&self, op: UnaryOp, expr: &THirExpr, _ty: &Type) -> String {
+    fn emit_unary(&self, op: UnaryOp, expr: &THirExpr, _ty: &Type, env: &EmitEnv) -> String {
         match op {
             UnaryOp::Not => {
                 // NOT (x IS NULL) → x IS NOT NULL（判空否定形式的规范输出）
@@ -647,12 +678,12 @@ impl Codegen<'_> {
                     ..
                 } = expr
                 {
-                    return format!("({}) IS NOT NULL", self.emit_expr(&args[0]));
+                    return format!("({}) IS NOT NULL", self.emit_expr(&args[0], env));
                 }
-                format!("(NOT ({}))", self.emit_expr(expr))
+                format!("(NOT ({}))", self.emit_expr(expr, env))
             }
             UnaryOp::Negate => {
-                let x = self.emit_expr(expr);
+                let x = self.emit_expr(expr, env);
                 match expr.ty().base() {
                     Type::I64 => format!(
                         "CASE WHEN ({x}) IS NULL THEN NULL WHEN ({x}) = {I64_MIN} THEN NULL ELSE -({x}) END",
@@ -664,12 +695,12 @@ impl Codegen<'_> {
         }
     }
 
-    fn emit_call(&self, name: BuiltinFn, args: &[THirExpr]) -> String {
+    fn emit_call(&self, name: BuiltinFn, args: &[THirExpr], env: &EmitEnv) -> String {
         use BuiltinFn::*;
         match name {
-            IsNull => format!("({}) IS NULL", self.emit_expr(&args[0])),
+            IsNull => format!("({}) IS NULL", self.emit_expr(&args[0], env)),
             Abs => {
-                let x = self.emit_expr(&args[0]);
+                let x = self.emit_expr(&args[0], env);
                 match args[0].ty().base() {
                     Type::I64 => format!(
                         "CASE WHEN ({x}) IS NULL THEN NULL WHEN ({x}) = {I64_MIN} THEN NULL ELSE ABS(({x})) END",
@@ -679,7 +710,7 @@ impl Codegen<'_> {
                 }
             }
             Round => {
-                let x = self.emit_expr(&args[0]);
+                let x = self.emit_expr(&args[0], env);
                 // ties-to-even + 零规范化
                 format!(
                     "CASE WHEN ({x}) IS NULL THEN NULL \
@@ -690,19 +721,89 @@ impl Codegen<'_> {
                     x = x
                 )
             }
-            Lower => format!("lower(({}))", self.emit_expr(&args[0])),
-            Upper => format!("upper(({}))", self.emit_expr(&args[0])),
-            Trim => format!("trim(({}))", self.emit_expr(&args[0])),
-            Length => format!("CAST(length(({})) AS BIGINT)", self.emit_expr(&args[0])),
+            Lower => format!("lower(({}))", self.emit_expr(&args[0], env)),
+            Upper => format!("upper(({}))", self.emit_expr(&args[0], env)),
+            // 不能直接用 DuckDB 的 `trim(x)`：实测它不去掉制表符（第 11 章）。把规范要求的
+            // Unicode White_Space 字符集显式交给 `trim(x, chars)`
+            Trim => format!(
+                "trim(({}), {})",
+                self.emit_expr(&args[0], env),
+                whitespace_set_sql()
+            ),
+            Length => format!(
+                "CAST(length(({})) AS BIGINT)",
+                self.emit_expr(&args[0], env)
+            ),
             Contains => format!(
                 "contains(({}), ({}))",
-                self.emit_expr(&args[0]),
-                self.emit_expr(&args[1])
+                self.emit_expr(&args[0], env),
+                self.emit_expr(&args[1], env)
             ),
+        }
+    }
+
+    /// 受限 cast（07 §7.8）。每条规则都是「先把引擎的行为收敛到规范，再取值」：
+    /// 引擎接受得更宽的写法（空白、下划线、`inf`）或别的取整习惯，都被守卫拦在外面。
+    /// 取值的参考实现是语义层的 `f64_to_i64` / `parse_i64_strict` / `parse_f64_strict`，
+    /// 测试拿它们和这里生成的 SQL 在真实 DuckDB 上对拍。
+    fn emit_cast(&self, expr: &THirExpr, to: &Type, env: &EmitEnv) -> String {
+        let x = self.emit_expr(expr, env);
+        match (expr.ty().base(), to) {
+            // 永不失败；null 经 CAST 仍是 null
+            (Type::I64, Type::F64) => format!("CAST(({x}) AS DOUBLE)"),
+            (Type::F64, Type::I64) => {
+                // 先查值域，再取整。值域内的 x 取整后必然可表示：取整最多把 x 推高 0.5，
+                // 而 2^63 附近能表示的 f64 都是整数、彼此至少相差 1024。
+                // 取整公式里的 CAST(FLOOR(x) AS BIGINT) 只在小数部分恰为 0.5 时求值，那时 |x| < 2^53
+                format!(
+                    "CASE WHEN ({x}) IS NULL THEN NULL \
+                     WHEN NOT (isfinite(({x}))) THEN NULL \
+                     WHEN ({x}) >= 9223372036854775808.0 OR ({x}) < -9223372036854775808.0 THEN NULL \
+                     ELSE CAST({} AS BIGINT) END",
+                    rne_integer(&x)
+                )
+            }
+            (Type::Str, Type::I64) => {
+                // 正则先把写法限死；越界的数字串 TRY_CAST 成 HUGEINT 得 NULL。
+                // 最后一步也用 TRY_CAST：万一前两道都没拦住，结果是 NULL 而不是引擎报错
+                format!(
+                    "CASE WHEN ({x}) IS NULL THEN NULL \
+                     WHEN NOT (regexp_matches(({x}), '^[+-]?[0-9]+$')) THEN NULL \
+                     WHEN NOT (TRY_CAST(({x}) AS HUGEINT) BETWEEN {I64_MIN} AND {I64_MAX}) THEN NULL \
+                     ELSE TRY_CAST(({x}) AS BIGINT) END"
+                )
+            }
+            (Type::Str, Type::F64) => {
+                // 规范文法：[+-]?([0-9]+(\.[0-9]*)?|\.[0-9]+)([eE][+-]?[0-9]+)?
+                let grammar = r"^[+-]?([0-9]+(\.[0-9]*)?|\.[0-9]+)([eE][+-]?[0-9]+)?$";
+                let parsed = format!("TRY_CAST(({x}) AS DOUBLE)");
+                format!(
+                    "CASE WHEN ({x}) IS NULL THEN NULL \
+                     WHEN NOT (regexp_matches(({x}), '{grammar}')) THEN NULL \
+                     ELSE {} END",
+                    // 非有限（如 "1e400"）→ NULL；-0.0 → +0.0
+                    norm_f64(&parsed)
+                )
+            }
+            // 语义层只放行四种转换；走到这里说明编译器自己出了错
+            _ => "NULL /* 内部错误：不支持的 cast */".to_string(),
         }
     }
 }
 
+/// 发射表达式时的环境。
+///
+/// 绝大多数场合它是空的。唯一的例外是 `HAVING`：标准 SQL 的 HAVING 不能引用同一层选择列表的
+/// 别名（比如 `COUNT(*) AS "f6"` 里的 `"f6"`），所以要把聚合输出的字段引用换成它的表达式。
+/// `subst` 就是这张「输出字段 id → 表达式 SQL」的替换表。
+struct EmitEnv {
+    subst: BTreeMap<pebble_hir::FieldId, String>,
+}
+
+/// 没有替换的环境：WHERE、选择列表、ORDER BY 等场合都用它。
+const NO_SUBST: EmitEnv = EmitEnv {
+    subst: BTreeMap::new(),
+};
 /// 一层 SELECT——一个「块」。
 ///
 /// v1 的 codegen 给每个算子都套一层子查询，n 个算子就是 n 层嵌套，DuckDB 解析到几百层
@@ -731,10 +832,15 @@ struct Block {
     /// WHERE 里的谓词，按流水线顺序。发射时合成一棵平衡的 AND 树（见 `and_all`）
     predicates: Vec<String>,
     group_by: Option<Vec<String>>,
+    /// HAVING 里的谓词：聚合层之后紧跟的 filter（即 having）并在这里（第 11 章）
+    having: Vec<String>,
+    /// 聚合层专用：输出字段 id → 它的表达式 SQL。发射 HAVING 时用它替换字段引用
+    subst: BTreeMap<pebble_hir::FieldId, String>,
     order_by: Vec<String>,
     limit: Option<i64>,
     /// 屏障：之后的算子不得再并进来（distinct / take / 聚合）。
-    /// 它们后面的 filter 若并进 WHERE，就等于跑到了它们前面——结果会变
+    /// 它们后面的 filter 若并进 WHERE，就等于跑到了它们前面——结果会变。
+    /// 唯一的例外是聚合层：紧跟其后的 filter 是「对分组结果过滤」，并进它的 HAVING
     barrier: bool,
 }
 
@@ -756,6 +862,8 @@ impl Block {
             distinct: false,
             predicates: Vec::new(),
             group_by: None,
+            having: Vec::new(),
+            subst: BTreeMap::new(),
             order_by: Vec::new(),
             limit: None,
             barrier: false,
@@ -817,6 +925,9 @@ impl Block {
                 let _ = write!(sql, " GROUP BY {}", keys.join(", "));
             }
         }
+        if !self.having.is_empty() {
+            let _ = write!(sql, " HAVING ({})", and_all(&self.having));
+        }
         if !self.order_by.is_empty() {
             let _ = write!(sql, " ORDER BY {}", self.order_by.join(", "));
         }
@@ -869,8 +980,34 @@ fn field_refs(e: &THirExpr, out: &mut BTreeSet<pebble_hir::FieldId>) {
                 field_refs(a, out);
             }
         }
+        THirExpr::Cast { expr, .. } => field_refs(expr, out),
         THirExpr::Literal { .. } => {}
     }
+}
+
+/// 「按 round-to-nearest, ties-to-even 取整」的 DOUBLE 表达式（结果已是整数值）。
+/// 小数部分写成 `(x) - FLOOR((x))`：它始终落在 [0, 1)，对负数也成立（见第 6 章）。
+fn rne_integer(x: &str) -> String {
+    format!(
+        "CASE WHEN (({x}) - FLOOR(({x}))) < 0.5 THEN FLOOR(({x})) \
+         WHEN (({x}) - FLOOR(({x}))) > 0.5 THEN (FLOOR(({x})) + 1.0) \
+         WHEN MOD(CAST(FLOOR(({x})) AS BIGINT), 2) = 0 THEN FLOOR(({x})) \
+         ELSE (FLOOR(({x})) + 1.0) END"
+    )
+}
+/// Unicode White_Space 的全部 25 个码点（04 §4.8：trim 去除两端 Unicode White_Space）。
+/// 写成 `chr(n) || chr(n) …`：纯 ASCII、不含控制字符，canonical SQL 保持单行。
+fn whitespace_set_sql() -> String {
+    const WHITE_SPACE: [u32; 25] = [
+        0x0009, 0x000A, 0x000B, 0x000C, 0x000D, 0x0020, 0x0085, 0x00A0, 0x1680, 0x2000, 0x2001,
+        0x2002, 0x2003, 0x2004, 0x2005, 0x2006, 0x2007, 0x2008, 0x2009, 0x200A, 0x2028, 0x2029,
+        0x202F, 0x205F, 0x3000,
+    ];
+    WHITE_SPACE
+        .iter()
+        .map(|c| format!("chr({c})"))
+        .collect::<Vec<_>>()
+        .join(" || ")
 }
 
 /// f64 规范化：非有限 → NULL；-0.0 → +0.0（v + 0.0）。
@@ -1278,14 +1415,12 @@ Table("orders.csv") as o
 
     /// take、distinct、聚合是屏障：它们后面的 filter 若并进 WHERE，就跑到了它们前面。
     #[test]
-    fn take_distinct_and_aggregation_are_barriers() {
+    fn take_and_distinct_are_barriers() {
         let cases = [
             // take 之后的 filter：并进 WHERE 就是在 LIMIT 之前过滤
             ".filter(a.amount > 1)\n  .take(2)\n  .filter(a.status == \"x\")",
             // distinct 之后的 filter：并进 WHERE 就是在去重之前过滤
             ".filter(a.amount > 1)\n  .distinct()\n  .filter(a.status == \"x\")",
-            // 聚合之后的 filter 是「对分组结果过滤」：并进 WHERE 就是在分组之前过滤——那是 having
-            ".filter(a.amount > 1)\n  .group_by(a.status)\n  .agg(n = count())\n  .filter(n > 0)",
         ];
         for ops in cases {
             let sql = sql_of(&format!(
@@ -1295,14 +1430,140 @@ Table("orders.csv") as o
             assert_eq!(layers(&sql), 4, "{ops}\n{sql}");
             assert_eq!(occurrences(&sql, " WHERE "), 2, "{ops}\n{sql}");
         }
+        // take 自己的一层里只有 LIMIT：ORDER BY 留在它里面那一层（第 10 章规则三）。
+        // 节点编号：源 0、filter 1（开 s1）、sort 2（并进 s1）、take 3（开 s3）
+        let sorted_then_taken = sql_of(
+            "Table(\"orders.csv\") as a\n  .filter(a.amount > 1)\n  .sort(a.amount)\n  .take(3)\n  .collect()\n",
+        );
+        assert_eq!(layers(&sorted_then_taken), 3, "{sorted_then_taken}");
+        assert_eq!(occurrences(&sorted_then_taken, " ORDER BY "), 1);
+        // SQL 由外向内嵌套：s3 的 FROM 里是排好序的 s1，s3 自己以 LIMIT 收尾，后面没有 ORDER BY
+        assert!(
+            sorted_then_taken.contains(" NULLS LAST) AS \"s3\" LIMIT 3) AS \"final\";"),
+            "{sorted_then_taken}"
+        );
+    }
+
+    /// 聚合是屏障的唯一例外：紧跟其后的 filter 是「对分组结果过滤」，并进它的 HAVING（第 11 章）。
+    #[test]
+    fn a_filter_right_after_aggregation_becomes_having() {
+        let sql = sql_of(
+            "Table(\"orders.csv\") as a\n  .filter(a.amount > 1)\n  .group_by(a.status)\n  .agg(n = count(), total = sum(a.amount))\n  .filter(n > 0 && total > 100)\n  .select(status, n)\n  .sort(n desc)\n  .collect()\n",
+        );
+        // filter 开的层、聚合层（HAVING 并了进去）、select 开的层（sort 并了进去）、最外层 final
+        assert_eq!(layers(&sql), 4, "{sql}");
+        // HAVING 紧跟在 GROUP BY 之后；子句顺序是 SQL 规定的 WHERE → GROUP BY → HAVING → ORDER BY
+        assert!(sql.contains(" GROUP BY \"f0\" HAVING ("), "{sql}");
+        let pos = |needle: &str| {
+            sql.find(needle)
+                .unwrap_or_else(|| panic!("{needle} in {sql}"))
+        };
+        assert!(
+            pos(" WHERE ") < pos(" GROUP BY ")
+                && pos(" GROUP BY ") < pos(" HAVING ")
+                && pos(" HAVING ") < pos(" ORDER BY "),
+            "{sql}"
+        );
+        // 引用聚合输出处换成它的表达式：标准 SQL 的 HAVING 看不到选择列表的别名。
+        // COUNT(*) 出现两次——选择列表一次，HAVING 里一次
+        assert_eq!(occurrences(&sql, "COUNT(*)"), 2, "{sql}");
+        // 分组之前的那个 filter 仍然在 WHERE 里
+        assert_eq!(occurrences(&sql, " WHERE "), 1, "{sql}");
+
+        // HAVING 只吸收「紧跟」聚合的 filter；中间隔了别的算子，filter 就回到 WHERE
+        let apart = sql_of(
+            "Table(\"orders.csv\") as a\n  .agg(n = count())\n  .select(n)\n  .filter(n > 0)\n  .collect()\n",
+        );
+        assert_eq!(occurrences(&apart, " HAVING "), 0, "{apart}");
+        assert_eq!(occurrences(&apart, " WHERE "), 1, "{apart}");
+
+        // 全局聚合（没有 GROUP BY）同样适用
+        let global = sql_of(
+            "Table(\"orders.csv\") as a\n  .agg(total = sum(a.amount))\n  .filter(total > 100)\n  .collect()\n",
+        );
+        assert!(global.contains(" HAVING ("), "{global}");
+        assert!(!global.contains("GROUP BY"), "{global}");
+    }
+
+    /// 聚合之后的 select、sort 不能并进聚合层：各自该开层的开层。
+    #[test]
+    fn select_after_aggregation_opens_a_layer_and_sort_joins_it() {
         let agg = sql_of(
             "Table(\"orders.csv\") as a\n  .group_by(a.status)\n  .agg(n = count())\n  .select(status, n)\n  .sort(n desc)\n  .collect()\n",
         );
-        // 聚合之后的 select、sort 可以并进 filter 开的新层；这里没有 filter，所以 select 自己开一层，sort 并进去
         // 聚合层、select 开的层（sort 并了进去）、最外层 final
         assert_eq!(layers(&agg), 3, "{agg}");
         assert!(agg.contains("GROUP BY"), "{agg}");
         assert_eq!(occurrences(&agg, " ORDER BY "), 1, "{agg}");
+        assert_eq!(occurrences(&agg, " HAVING "), 0, "{agg}");
+    }
+
+    /// 受限 cast 的 SQL（07 §7.8）：每条规则都先用守卫把引擎的行为收敛到规范，再取值。
+    #[test]
+    fn cast_sql_narrows_the_engine_to_the_spec() {
+        let cast_of = |expr: &str| {
+            sql_of(&format!(
+                "Table(\"orders.csv\") as a\n  .extend({{ x = {expr} }})\n  .collect()\n"
+            ))
+        };
+
+        // i64 → f64：永不失败，直接 CAST；null 经 CAST 仍是 null
+        let sql = cast_of("cast(a.amount as f64)");
+        assert!(sql.contains("CAST((\"f1\") AS DOUBLE) AS \"f3\""), "{sql}");
+
+        // f64 → i64：先排除非有限与越界，再按取偶取整，最后 CAST
+        let sql = cast_of("cast(2.5 as i64)");
+        let x = "CAST(2.5 AS DOUBLE)";
+        assert!(
+            sql.contains(&format!("CASE WHEN ({x}) IS NULL THEN NULL WHEN NOT (isfinite(({x}))) THEN NULL WHEN ({x}) >= 9223372036854775808.0 OR ({x}) < -9223372036854775808.0 THEN NULL ELSE CAST(CASE WHEN")),
+            "{sql}"
+        );
+        assert!(sql.contains("MOD(CAST(FLOOR(("), "{sql}");
+        assert!(sql.contains("AS BIGINT) END AS \"f3\""), "{sql}");
+
+        // string → i64：正则限死写法；HUGEINT 中转查值域；全程 TRY_CAST，不给引擎报错的机会
+        let sql = cast_of("cast(a.status as i64)");
+        assert!(
+            sql.contains("regexp_matches((\"f0\"), '^[+-]?[0-9]+$')"),
+            "{sql}"
+        );
+        assert!(
+            sql.contains(
+                "TRY_CAST((\"f0\") AS HUGEINT) BETWEEN -9223372036854775808 AND 9223372036854775807"
+            ),
+            "{sql}"
+        );
+        assert!(!sql.contains(" ELSE CAST("), "{sql}");
+        assert!(
+            sql.contains("ELSE TRY_CAST((\"f0\") AS BIGINT) END AS \"f3\""),
+            "{sql}"
+        );
+
+        // string → f64：规范文法的正则；TRY_CAST 之后做有限性检查与零规范化
+        let sql = cast_of("cast(a.status as f64)");
+        assert!(
+            sql.contains(
+                "regexp_matches((\"f0\"), '^[+-]?([0-9]+(\\.[0-9]*)?|\\.[0-9]+)([eE][+-]?[0-9]+)?$')"
+            ),
+            "{sql}"
+        );
+        assert!(sql.contains("TRY_CAST((\"f0\") AS DOUBLE)"), "{sql}");
+        assert!(sql.contains("isfinite(") && sql.contains("+ 0.0"), "{sql}");
+    }
+
+    /// trim 的字符集是规范里的 Unicode White_Space（25 个码点），不是 DuckDB 默认的那一套。
+    #[test]
+    fn trim_passes_the_whole_unicode_whitespace_set() {
+        let sql =
+            sql_of("Table(\"orders.csv\") as a\n  .extend({ x = trim(a.status) })\n  .collect()\n");
+        assert!(
+            sql.contains("trim((\"f0\"), chr(9) || chr(10) || chr(11) || chr(12) || chr(13) || chr(32) || chr(133) || chr(160) || chr(5760) || "),
+            "{sql}"
+        );
+        assert!(sql.contains("chr(8287) || chr(12288)) AS \"f3\""), "{sql}");
+        // 零宽空格 U+200B（8203）不是 White_Space，不在集合里
+        assert!(!sql.contains("chr(8203)"), "{sql}");
+        assert_eq!(occurrences(&sql, "chr("), 25, "{sql}");
     }
 
     /// join 开新的一层，但它不是屏障：后面的 filter、extend 可以并进来。
@@ -1368,6 +1629,7 @@ Table("orders.csv") as o
                 ty: Type::F64,
                 span: pebble_diagnostic::Span::new(0, 0),
             }],
+            &NO_SUBST,
         );
         assert!(r.contains("MOD"));
         assert!(r.contains("0.5"));

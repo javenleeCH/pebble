@@ -1,0 +1,15 @@
+{
+  "lock_version": 1,
+  "source": {
+    "kind": "table",
+    "locator": "tests/data/strings.csv"
+  },
+  "fields": [
+    {
+      "name": "s",
+      "type": "str",
+      "optional": false
+    }
+  ],
+  "schema_hash": "sha256:00116037f0ec2d1565baf4cfa86ebe1c416d5340395782bd361cbedb4c2cbd5d"
+}

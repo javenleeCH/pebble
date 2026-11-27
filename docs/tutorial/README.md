@@ -29,19 +29,21 @@
 | [第 8 章](ch08-解析器错误恢复.md) | 解析器错误恢复：同步点、级联错误、阶段门控 | `pebble-parser/src/{lexer,parser}.rs`、`pebble-diagnostic/src/lib.rs` | 见 git log |
 | [第 9 章](ch09-语义层错误恢复.md) | 语义层错误恢复：毒化，让坏消息静默传播 | `pebble-semantics/src/lib.rs` | 见 git log |
 | [第 10 章](ch10-codegen融合.md) | codegen 融合：不是每个算子都要一层子查询（工件 v2） | `pebble-duckdb/src/lib.rs`、`pebble-hir/src/manifest.rs` | 见 git log |
+| [第 11 章](ch11-having与cast.md) | having 与受限 cast：给语言加一个特性的完整路径（v0.1.1） | `pebble-{parser,hir,semantics,duckdb,latex}`、`tests/differential.rs` | 见 git log |
 | [附录 A](appendix-ci-发布门禁.md) | CI 与发布门禁：把纪律变成机器 | `.github/workflows/*`、`docs_gate.rs` | 见 git log |
 
 > M0 的实现以单个大提交 `3bccd59` 收口（教训：教程驱动应当「每章一 commit」）。从第 8 章起严格执行：一章一个 commit，读者 checkout 到该章的提交就能复现本章内容。
 
 ## 后续章节规划（实现一章、写一章）
 
-- 第 11 章：`having` 与受限 `cast`（v0.1.1）
 - 第 12 章：M2 证据签名与独立 verifier
 - 第 13 章：M3 Polars 第二后端与语义差集测试
 - 第 14 章：M4 Cranelift 原生后端初探（表达式 JIT）
 
 > 排序说明：codegen 融合（第 10 章）原本排在 `having/cast` 之后，提前是因为它修的是已发布后端的一个真实限制，
 > 而且它会改变全部 canonical SQL——越早做，需要重新审批的东西越少。
+>
+> 待定的设计决定：`lower` / `upper` 的 Unicode 全映射差集（第 11 章 §11）——改规范还是改实现。
 
 > 路线调整（2026-11-25）：原计划第 8 章「补齐 §8.6」。实现时发现语义阶段的多错误报告依赖一项独立的技术（毒化类型），一堂课讲一个核心想法对新手更好，故单列为第 9 章，其后章节顺延一位。
 

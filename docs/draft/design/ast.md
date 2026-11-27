@@ -110,7 +110,7 @@ pub enum AggFunc { Count, Sum, Min, Max, Avg }
 4. `join(other, on = expr)` 中的 `on =` 是固定语法，不改变 `Join` 的 AST 结构；当前语法只允许右表为源算子。
 5. 不接 `GroupBy` 的 `Agg` 是全局聚合；`GroupBy` 后必须且只能紧跟一个 `Agg`。
 6. `count()` 使用 `arg = None`；其他聚合的参数要求由语义层检查。
-7. `having` 在 v0.1.1 前不进入 AST；MVP 使用聚合后的普通 `filter`。
+7. `having(pred)`（v0.1.1）是语法糖：AST 中是独立的 `Op::Having`，语义层把它 lowering 成与紧随 `agg` 的 `filter` 相同的结构。`cast(expr as T)`（v0.1.1）是独立的 `Expr::Cast`，目标类型只有 `i64` / `f64` / `string`。
 8. `sort/take` 是顺序敏感的表示层操作，后端不得把它们当普通无序关系算子自由重排。
 
 ## 5. 终端算子

@@ -19,6 +19,7 @@
 | 8 | 解析器错误恢复：同步点、级联错误、阶段门控；Span 单位 bug 修复 | [`tutorial/ch08-解析器错误恢复.md`](tutorial/ch08-解析器错误恢复.md) |
 | 9 | 语义层错误恢复：毒化，让坏消息静默传播；codegen 两个 M0 遗留缺陷的修复记在第 6 章 | [`tutorial/ch09-语义层错误恢复.md`](tutorial/ch09-语义层错误恢复.md) |
 | 10 | codegen 融合：连续的行级算子并进同一层 SELECT，工件版本 v2；差分测试与变异验证 | [`tutorial/ch10-codegen融合.md`](tutorial/ch10-codegen融合.md) |
+| 11 | having 与受限 cast（v0.1.1）：规范 → 文法 → HIR → 语义 → 后端的完整路径；参考实现与引擎对拍 | [`tutorial/ch11-having与cast.md`](tutorial/ch11-having与cast.md) |
 
 课程地图与开发纪律见 [`tutorial/README.md`](tutorial/README.md)。
 

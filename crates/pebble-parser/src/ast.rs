@@ -84,6 +84,12 @@ pub enum Op {
         bindings: Vec<AggBinding>,
         span: Span,
     },
+    /// `having(pred)`（v0.1.1，04 §4.12 / 06 §6.4）：语法糖，语义层把它 lowering 成
+    /// 与紧随 agg 的 `filter` 相同的结构。
+    Having {
+        pred: Expr,
+        span: Span,
+    },
 }
 
 impl Op {
@@ -97,7 +103,8 @@ impl Op {
             | Op::Take { span, .. }
             | Op::Join { span, .. }
             | Op::GroupBy { span, .. }
-            | Op::Agg { span, .. } => *span,
+            | Op::Agg { span, .. }
+            | Op::Having { span, .. } => *span,
         }
     }
 }
@@ -221,6 +228,31 @@ pub enum Expr {
         args: Vec<Expr>,
         span: Span,
     },
+    /// `cast(expr as T)`（v0.1.1，04 §4.12）：受限显式转换。
+    /// 这是语言里唯一允许书写类型名的位置，且只有三个目标类型。
+    Cast {
+        expr: Box<Expr>,
+        target: CastTarget,
+        span: Span,
+    },
+}
+
+/// `cast` 的目标类型。只有这三个；可空性由操作数和「转换是否可能失败」推导，不能手写 `?T`。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CastTarget {
+    I64,
+    F64,
+    Str,
+}
+
+impl CastTarget {
+    pub fn name(&self) -> &'static str {
+        match self {
+            CastTarget::I64 => "i64",
+            CastTarget::F64 => "f64",
+            CastTarget::Str => "string",
+        }
+    }
 }
 
 impl Expr {
@@ -231,7 +263,8 @@ impl Expr {
             | Expr::Binary { span, .. }
             | Expr::Unary { span, .. }
             | Expr::If { span, .. }
-            | Expr::Call { span, .. } => *span,
+            | Expr::Call { span, .. }
+            | Expr::Cast { span, .. } => *span,
         }
     }
 }

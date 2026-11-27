@@ -89,7 +89,7 @@
 
 ## 7.7 谓词与 if
 
-filter、join `on`、if 条件及未来 having 均接受 `bool/?bool`。**成立当且仅当值为 true**；false 和 null 均不成立。
+filter、having、join `on` 及 if 条件均接受 `bool/?bool`。**成立当且仅当值为 true**；false 和 null 均不成立。
 
 - filter 只保留 pred=true 的行。
 - join 只保留 on=true 的行对，因此普通等值 join 不匹配 null 键。
@@ -124,6 +124,16 @@ MVP 仅允许有限 IEEE-754 binary64 值。NaN、±∞ 不得作为字面量、
 
 以上规则不允许后端用自身默认的 Infinity/NaN 结果替代 checked-null。
 
+### 显式转换 cast
+
+四种转换的取值都与后端无关：
+
+- `i64 → f64`：按 IEEE-754 round-to-nearest, ties-to-even 得到最接近的 f64（可能丢失精度，但永不失败）。
+- `f64 → i64`：先把 x 按 round-to-nearest, ties-to-even 取整为整数 r；r 落在 `[-2^63, 2^63-1]` 内则结果为 r，否则 null。例如 `cast(2.5 as i64) = 2`、`cast(-2.5 as i64) = -2`、`cast(1e300 as i64) = null`。
+- `string → i64`：字符串必须匹配 `[+-]?[0-9]+`（ASCII；不允许空白、小数点、下划线、进制前缀），且数值在 i64 值域内；否则 null。`"-0"` 得到 0。
+- `string → f64`：字符串必须匹配 `[+-]?([0-9]+(\.[0-9]*)?|\.[0-9]+)([eE][+-]?[0-9]+)?`（ASCII 十进制或科学记数法），取最接近的 f64（round-to-nearest, ties-to-even）。结果非有限（如 `"1e400"`）则为 null；下溢得到 0 并遵守零值规范化。`"inf"`、`"nan"` 等写法不合法。
+
+后端不得直接沿用引擎自己的字符串解析或取整习惯：引擎若接受更宽的写法（空白、下划线、`inf`）或采用别的取整方向，后端必须用守卫把它们收敛到本节的规则。
 ## 7.9 聚合语义
 
 ### 输入、空组与 null

@@ -16,6 +16,10 @@
 >
 > **第 10 章（codegen 融合）已完成**：DuckDB 后端不再给每个算子套一层子查询，连续的 `filter` / `extend` / `select` / `sort` 并进同一层 `SELECT`（工件版本 v2）。
 > 两万个连续 `filter` 的流水线此前会让引擎崩溃，现在正常运行。教程见 [`docs/tutorial/ch10-codegen融合.md`](docs/tutorial/ch10-codegen融合.md)。
+>
+> **第 11 章（having 与受限 cast）已完成（v0.1.1）**：`.agg(…).having(…)` 把「对分组结果过滤」写进源码，并发射为 SQL 的 `HAVING`；
+> `cast(expr as i64|f64|string)` 提供四种有明确取值规则的显式转换。
+> 取值规则有参考实现，并在真实 DuckDB 上逐格对拍。教程见 [`docs/tutorial/ch11-having与cast.md`](docs/tutorial/ch11-having与cast.md)。
 
 ## 文档导航
 
@@ -62,6 +66,8 @@ Rust 2024 · 手写递归下降解析（原型实现选择；Chumsky 为路线�
 
 后端路线：**DuckDB SQL（M0 已实现）→ Polars（M3）→ Cranelift / MLIR（M4 原生执行后端，保留并持续推进研究原型）**。
 
-M0 明确不做：Polars/多后端、另写解释器、自建 Physical Plan、Arrow 全栈、自研 storage；having/cast/时间函数/coalesce/split 按计划后置。
+M0 明确不做：Polars/多后端、另写解释器、自建 Physical Plan、Arrow 全栈、自研 storage；时间函数/coalesce/split、数值转字符串与通用 `cast` 仍后置（`having` 与受限 `cast` 已在 v0.1.1 完成）。
 
 工件版本：DuckDB 后端的 SQL 形态为 v2（第 10 章）。v1 给每个算子套一层子查询，实测连续约 300 个算子以上 DuckDB 就无法执行；v2 把连续的行级算子并进同一层 `SELECT`，这个限制已消除。
+
+已知语义差集（如实记录，见第 11 章）：`lower` / `upper` 在三处特殊码点上与规范的「Unicode 全映射」不一致——DuckDB 实现的是简单映射（`lower("İ")`、`upper("ß")`、词尾 `σ`）。规范与实现该改哪一边，尚待决定。

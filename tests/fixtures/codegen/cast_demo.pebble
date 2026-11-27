@@ -1,0 +1,6 @@
+// 第 11 章演示：cast 的守卫——f64 → i64
+Table("tests/data/casts.csv") as c
+  .extend({ whole = cast(c.x as i64) })
+  .take(2)
+  .select(s, x, whole)
+  .collect()

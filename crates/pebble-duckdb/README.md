@@ -15,4 +15,8 @@ SQL 形态（artifact v2，第 10 章）：连续的行级算子并进同一层 
 
 验证手段：单个算子的流水线 SQL 正文与 v1 逐字相同（不变的部分被钉成测试）；新旧实现在同一 DuckDB 上的差分测试；端到端与独立计算的对照；变异验证。教程见 `docs/tutorial/ch10-codegen融合.md`。
 
+第 11 章：紧跟聚合的 `filter`（即 `having`）并进聚合层的 `HAVING`——聚合屏障唯一的例外；HAVING 里的聚合输出引用替换成表达式，不依赖方言的别名引用。`cast` 的四种转换各带守卫，先把引擎的行为（更宽的字符串写法、进位取整、越界报错）收敛到规范再取值；`trim` 显式给出 Unicode White_Space 的全部 25 个码点（DuckDB 默认的 `trim` 不去制表符）。
+
+已知语义差集（未修）：`lower` / `upper` 在三处特殊码点上是 Unicode 简单映射，而规范要求全映射。
+
 后续多后端路线：Polars 在 M3 作为独立 BackendArtifact 接入；Cranelift/MLIR 在 M4 走 Pebble Physical Plan 与 native BackendArtifact，不经过本 crate。
