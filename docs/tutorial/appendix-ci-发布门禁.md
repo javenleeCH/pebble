@@ -107,6 +107,25 @@ cargo +1.85.0 test --workspace --locked                                 # MSRV �
 
 四个修复（`impl Parser<'_>` ×3、fold 替换 map+collect）在新旧两个 clippy 下都干净——**门禁修复必须同时过两个版本的 lint，只过一边就会在下一次翻车**。
 
+### 第二次翻车：行尾也是环境的一部分
+
+第 8 章推上去之后又红了一次，这回只有 `Verify (windows-latest)`：其余测试全过，唯独「教程输出逐字比对」失败——比对面多出了一个空行。
+
+原因不在代码逻辑。GitHub 的 Windows runner 以 `core.autocrlf=true` 检出，教程文件在那里是 CRLF，而我本地那份是 LF。门禁从教程里抽取输出块时，用 `trim_start_matches('\n')` 剥掉围栏后紧跟的换行；CRLF 下那里是 `\r\n`，开头的 `\r` 没被剥掉，之后再统一行尾，就多出了一个空行。读一读那段代码完全看不出问题——**它只在另一种行尾下才是错的**。
+
+两次翻车其实是同一条教训的两种形态：**门禁除了比对你的代码，还在比对你的环境**——第一次是工具链版本，这一次是行尾。修法也同构：把环境的差异收拢在一处（第一次是 `rust-version`，这一次是门禁的 `read()` 统一把 CRLF 换成 LF），不让它散落到各个比较里。
+
+预防的办法也只有一个：**在本地重演那个环境**。附录开头的预演命令覆盖了工具链；行尾这一次之后，清单上多了一项——用一次**全新的检出去跑**，而不是在改了又改的工作区里跑：
+
+```powershell
+git worktree add --detach target/ci-sim HEAD     # 全新检出；autocrlf=true 下全部文件是 CRLF
+cd target/ci-sim
+cargo +1.85.0 test --workspace --all-targets --locked
+cd ../..; git worktree remove --force target/ci-sim
+```
+
+排查这类问题时，第一步永远是**先在本地复现**（把教程临时转成 CRLF，同一个测试立刻就红了），而不是盯着代码猜。复现了，修复才算验证过。
+
 ## 发布流水线（release.yml）
 
 tag `v*` 触发，三步走：
