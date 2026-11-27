@@ -49,8 +49,16 @@ fn required_sections_for(chapter: &str) -> Vec<&'static str> {
     }
 }
 
+/// 读取仓库里的文本文件，并把行尾统一成 LF。
+///
+/// 行尾属于检出环境，不属于内容：GitHub 的 Windows runner 以 `core.autocrlf=true` 检出，
+/// 同一份提交在那里是 CRLF、在 Linux 上是 LF。门禁若不先统一行尾，就会出现
+/// 「本地绿、CI 红」——第 8 章的输出比对就这样栽过一次：CRLF 下围栏后的换行是 `\r\n`，
+/// 只剥 `\n` 的清理没起作用，于是比对面多出了一个空行。
 fn read(path: PathBuf) -> String {
-    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("读取 {} 失败: {}", path.display(), e))
+    std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("读取 {} 失败: {}", path.display(), e))
+        .replace("\r\n", "\n")
 }
 
 fn assert_exists(path: PathBuf, what: &str) {
@@ -144,9 +152,11 @@ fn tutorial_referenced_assets_exist() {
     }
 }
 
-/// 抽取 Markdown 中「`marker` 之后第一个 ```text 代码块」的内容（行尾统一成 LF；
-/// 紧贴代码围栏的换行属于排版，不算内容）。
-fn output_block_after<'a>(chapter: &'a str, marker: &str) -> &'a str {
+/// 抽取 Markdown 中「`marker` 之后第一个 ```text 代码块」的内容。
+/// 紧贴代码围栏的换行属于排版，不算内容。行尾无论是 LF 还是 CRLF，结果都一样。
+fn output_block_after(chapter: &str, marker: &str) -> String {
+    // 先统一行尾：CRLF 下围栏之后的换行是 `\r\n`，只剥 `\n` 的清理会留下一个 `\r`
+    let chapter = chapter.replace("\r\n", "\n");
     let (_, after) = chapter
         .split_once(marker)
         .unwrap_or_else(|| panic!("教程缺少标记文本「{marker}」"));
@@ -159,6 +169,18 @@ fn output_block_after<'a>(chapter: &'a str, marker: &str) -> &'a str {
         .next()
         .unwrap_or("")
         .trim_start_matches('\n')
+        .to_string()
+}
+
+/// 这段输出比对曾经「本地绿、CI 红」：GitHub 的 Windows runner 以 CRLF 检出，
+/// 抽出来的文本开头多了一个换行。抽取函数因此必须与行尾无关——用两种行尾各测一次。
+#[test]
+fn output_block_extractor_is_line_ending_agnostic() {
+    let marker = "最后一条命令的完整输出：";
+    let lf = format!("前言\n\n{marker}\n\n```text\nline 1\nline 2\n```\n\n后记\n");
+    let crlf = lf.replace('\n', "\r\n");
+    assert_eq!(output_block_after(&lf, marker), "line 1\nline 2\n");
+    assert_eq!(output_block_after(&crlf, marker), "line 1\nline 2\n");
 }
 
 /// 教程贴的输出必须与实现逐字一致。
@@ -194,7 +216,6 @@ fn tutorial_ch08_output_matches_implementation() {
         "编译失败时不得写出任何工件：{}",
         out.display()
     );
-    let shown = shown.replace("\r\n", "\n");
     assert_eq!(
         failure.report.trim_end(),
         shown.trim_end(),
@@ -202,7 +223,7 @@ fn tutorial_ch08_output_matches_implementation() {
     );
 }
 
-/// 读取 `dir` 下全部 `.rs` 源文件（跳过构建输出目录），行尾统一成 LF。
+/// 读取 `dir` 下全部 `.rs` 源文件（跳过构建输出目录）；行尾已由 `read` 统一成 LF。
 fn rust_sources(dir: &PathBuf, out: &mut Vec<String>) {
     for entry in
         std::fs::read_dir(dir).unwrap_or_else(|e| panic!("读取 {} 失败: {}", dir.display(), e))
@@ -214,7 +235,7 @@ fn rust_sources(dir: &PathBuf, out: &mut Vec<String>) {
                 rust_sources(&path, out);
             }
         } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
-            out.push(read(path).replace("\r\n", "\n"));
+            out.push(read(path));
         }
     }
 }
@@ -231,8 +252,7 @@ fn tutorial_ch08_code_quotes_are_verbatim() {
         repo.join("docs")
             .join("tutorial")
             .join("ch08-解析器错误恢复.md"),
-    )
-    .replace("\r\n", "\n");
+    );
     let mut sources = Vec::new();
     rust_sources(&repo.join("crates"), &mut sources);
     assert!(!sources.is_empty(), "没有读到任何 .rs 源文件");
