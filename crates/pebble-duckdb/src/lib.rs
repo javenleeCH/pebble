@@ -32,8 +32,8 @@ pub fn compile_sql(
         return Err("root 必须是终端节点".into());
     };
     let input_id = base.inputs[0];
-    let inner = cg.emit_node(input_id)?;
-    let final_select = cg.final_select(&inner, base.inputs[0]);
+    let sql = cg.emit_all()?;
+    let final_select = cg.final_select(&sql[input_id as usize], base.inputs[0]);
     let statement = match kind {
         pebble_hir::TerminalKind::Write { path } => {
             format!(
@@ -90,27 +90,55 @@ struct Codegen<'a> {
 }
 
 impl Codegen<'_> {
-    fn input_schema_ids(&self, node_id: pebble_hir::NodeId) -> BTreeSet<pebble_hir::FieldId> {
-        let mut ids = BTreeSet::new();
-        for &input in &self.hir.nodes[node_id as usize].base().inputs {
-            for f in &self.hir.nodes[input as usize].base().output.fields {
-                ids.insert(f.id);
-            }
-        }
-        ids
+    /// 节点 `node_id` 的输出字段 id——也就是它的消费者眼里的「输入 schema」。
+    ///
+    /// 这里曾经多套了一层（取的是「输入的输入的输出」）。后果是：`extend` / `join`
+    /// 直接接在源后面时得到空集——extend 报「无来源」、join 生成 `SELECT , …`；
+    /// 而它们前面隔着一个算子时又碰巧是对的，所以样例一直是绿的。
+    fn output_ids(&self, node_id: pebble_hir::NodeId) -> BTreeSet<pebble_hir::FieldId> {
+        self.hir.nodes[node_id as usize]
+            .base()
+            .output
+            .fields
+            .iter()
+            .map(|f| f.id)
+            .collect()
     }
 
-    fn emit_node(&self, id: pebble_hir::NodeId) -> Result<String, String> {
-        match &self.hir.nodes[id as usize] {
-            HirNode::Source { base, source, kind } => self.emit_scan(base.id, *source, kind),
-            HirNode::Transform { base, kind } => self.emit_transform(base, kind),
-            HirNode::Aggregate {
-                base,
-                group_keys,
-                bindings,
-            } => self.emit_aggregate(base, group_keys, bindings),
-            HirNode::Terminal { .. } => Err("终端节点不是可发射的中间阶段".into()),
+    /// 自底向上生成每个节点的 SQL，结果按节点编号存放。
+    ///
+    /// 每个算子在 SQL 里是包住内层的一层子查询，所以直觉的写法是「先递归地生成内层」——
+    /// 于是 n 个算子的流水线就在调用栈上叠 n 层，两万个 `.filter` 就能让编译器栈溢出。
+    ///
+    /// 其实不必递归：HIR 的节点是按拓扑序存放的（每个节点都排在自己的输入之后），
+    /// 按存放顺序逐个生成，生成某节点时它的输入早已就绪，直接从数组里取即可。
+    fn emit_all(&self) -> Result<Vec<String>, String> {
+        let mut sql = Vec::with_capacity(self.hir.nodes.len());
+        for (i, node) in self.hir.nodes.iter().enumerate() {
+            // 防御：若某个输入排在消费者之后（或不存在），下标取值就会错——明确报内部错误
+            if let Some(bad) = node
+                .base()
+                .inputs
+                .iter()
+                .find(|&&input| input as usize >= i)
+            {
+                return Err(format!(
+                    "内部错误：节点 {i} 的输入 {bad} 未排在它之前（HIR 不是拓扑序）"
+                ));
+            }
+            let text = match node {
+                HirNode::Source { base, source, kind } => self.emit_scan(base.id, *source, kind)?,
+                HirNode::Transform { base, kind } => self.emit_transform(base, kind, &sql)?,
+                HirNode::Aggregate {
+                    base,
+                    group_keys,
+                    bindings,
+                } => self.emit_aggregate(base, group_keys, bindings, &sql)?,
+                HirNode::Terminal { .. } => String::new(), // 终端由 final_select 负责
+            };
+            sql.push(text);
         }
+        Ok(sql)
     }
 
     fn emit_scan(
@@ -180,17 +208,9 @@ impl Codegen<'_> {
         &self,
         base: &pebble_hir::NodeBase,
         kind: &TransformKind,
+        sql: &[String],
     ) -> Result<String, String> {
-        let inner = self.emit_node(base.inputs[0])?;
-        let passthrough = |ids: &BTreeSet<pebble_hir::FieldId>| -> String {
-            base.output
-                .fields
-                .iter()
-                .filter(|f| ids.contains(&f.id))
-                .map(|f| format!("\"f{}\"", f.id))
-                .collect::<Vec<_>>()
-                .join(", ")
-        };
+        let inner = &sql[base.inputs[0] as usize];
         match kind {
             TransformKind::Filter { pred } => {
                 let pred_sql = self.emit_expr(pred);
@@ -203,7 +223,7 @@ impl Codegen<'_> {
                 ))
             }
             TransformKind::Extend { bindings } => {
-                let input_ids = self.input_schema_ids(base.inputs[0]);
+                let input_ids = self.output_ids(base.inputs[0]);
                 let mut select_list = Vec::new();
                 for f in &base.output.fields {
                     if input_ids.contains(&f.id) {
@@ -273,13 +293,28 @@ impl Codegen<'_> {
                 n
             )),
             TransformKind::Join { on } => {
-                let right = self.emit_node(base.inputs[1])?;
-                let left_ids = self.input_schema_ids(base.inputs[0]);
-                let left_cols = passthrough(&left_ids);
+                let right = &sql[base.inputs[1] as usize];
+                let left_ids = self.output_ids(base.inputs[0]);
+                let right_ids = self.output_ids(base.inputs[1]);
+                // 连接结果的列 = 左表字段 + 右表字段，各出现一次。
+                // 用表别名限定，不依赖「两边的列名恰好不重复」这种巧合。
+                let mut cols = Vec::new();
+                for f in &base.output.fields {
+                    let side = if left_ids.contains(&f.id) {
+                        "l"
+                    } else if right_ids.contains(&f.id) {
+                        "r"
+                    } else {
+                        return Err(format!(
+                            "join 输出字段 f{} 既不来自左表，也不来自右表",
+                            f.id
+                        ));
+                    };
+                    cols.push(format!("\"{side}{}\".\"f{}\"", base.id, f.id));
+                }
                 Ok(format!(
-                    "SELECT {}, {} FROM ({}) AS \"l{}\" JOIN ({}) AS \"r{}\" ON ({})",
-                    left_cols,
-                    self.all_cols(base),
+                    "SELECT {} FROM ({}) AS \"l{}\" JOIN ({}) AS \"r{}\" ON ({})",
+                    cols.join(", "),
                     inner,
                     base.id,
                     right,
@@ -295,8 +330,9 @@ impl Codegen<'_> {
         base: &pebble_hir::NodeBase,
         group_keys: &[pebble_hir::GroupKeyH],
         bindings: &[pebble_hir::AggBindingH],
+        sql: &[String],
     ) -> Result<String, String> {
-        let inner = self.emit_node(base.inputs[0])?;
+        let inner = &sql[base.inputs[0] as usize];
         let mut select_list = Vec::new();
         let mut group_by = Vec::new();
         for k in group_keys {
@@ -719,6 +755,93 @@ Table("orders.csv") as o
             .expect("lock"),
         ]);
         pebble_semantics::compile(&program, &catalog, &mut diags).expect("lower")
+    }
+
+    /// 把一段 Pebble 源码 lowering 成 HIR（表 `orders.csv` 的 lock 同 `lock_for`）。
+    fn lower(src: &str) -> Hir {
+        let mut diags = pebble_diagnostic::DiagBag::new();
+        let program = pebble_parser::parse(src, &mut diags).expect("parse");
+        let lock = lock_for(&SourceKind::Table {
+            locator: "orders.csv".into(),
+            schema_lock_hash: pebble_hir::Hash([0u8; 32]),
+        })
+        .expect("lock");
+        let catalog = pebble_semantics::Catalog::from_locks(vec![lock]);
+        pebble_semantics::compile(&program, &catalog, &mut diags).expect("lower")
+    }
+
+    fn sql_of(src: &str) -> String {
+        let hir = lower(src);
+        let BackendArtifact::DuckDbSql { canonical_sql } =
+            compile_sql(&hir, &lock_for).expect("codegen");
+        canonical_sql
+    }
+
+    #[test]
+    fn extend_directly_on_source_compiles() {
+        // 回归：extend 是第一个算子时，曾报「extend 输出字段 f0 无来源」——合法程序被拒绝。
+        // 病根是取「输入 schema」时多套了一层；前面隔着一个算子时又碰巧是对的，所以样例一直是绿的。
+        let sql = sql_of("Table(\"orders.csv\") as o\n  .extend({ x = 1 })\n  .collect()\n");
+        assert!(
+            sql.contains("SELECT \"f0\", \"f1\", \"f2\", 1 AS \"f3\" FROM (SELECT \"t0\".\"status\" AS \"f0\""),
+            "{sql}"
+        );
+    }
+
+    /// `src` 里 join 节点的编号（SQL 里表别名 `l<n>` / `r<n>` 用的就是它）。
+    /// 从 HIR 里读，不在测试里手数：右表的扫描也是节点，编号会把它算进去。
+    fn join_node_id(src: &str) -> usize {
+        lower(src)
+            .nodes
+            .iter()
+            .position(|n| {
+                matches!(
+                    n,
+                    HirNode::Transform {
+                        kind: TransformKind::Join { .. },
+                        ..
+                    }
+                )
+            })
+            .expect("src 里应有一个 join")
+    }
+
+    #[test]
+    fn join_lists_left_and_right_columns_once() {
+        // 回归 1：join 直接接在源后面时，曾生成 `SELECT , "f0", …`——
+        // 编译「成功」，坏掉的 SQL 进了 manifest，到 DuckDB 上才报语法错误
+        let first_src = "Table(\"orders.csv\") as a\n  .join(Table(\"orders.csv\") as b, on = a.status == b.status)\n  .collect()\n";
+        let first = sql_of(first_src);
+        let j = join_node_id(first_src);
+        assert!(
+            first.contains(&format!(
+                "SELECT \"l{j}\".\"f0\", \"l{j}\".\"f1\", \"l{j}\".\"f2\", \"r{j}\".\"f3\", \"r{j}\".\"f4\", \"r{j}\".\"f5\" FROM ("
+            )),
+            "{first}"
+        );
+
+        // 回归 2：join 在另一个算子之后时，左表的列曾在列表里出现两遍
+        let filtered_src = "Table(\"orders.csv\") as a\n  .filter(a.amount > 1)\n  .join(Table(\"orders.csv\") as b, on = a.status == b.status)\n  .collect()\n";
+        let after_filter = sql_of(filtered_src);
+        let j = join_node_id(filtered_src);
+        assert!(
+            after_filter.contains(&format!(
+                "SELECT \"l{j}\".\"f0\", \"l{j}\".\"f1\", \"l{j}\".\"f2\", \"r{j}\".\"f3\", \"r{j}\".\"f4\", \"r{j}\".\"f5\" FROM ("
+            )),
+            "{after_filter}"
+        );
+        // 左侧确实是过滤之后的结果，而不是绕过了 filter 直接接在源上
+        let left_side = after_filter
+            .split(&format!("AS \"l{j}\" JOIN ("))
+            .next()
+            .unwrap_or("");
+        assert!(left_side.contains("WHERE"), "{after_filter}");
+
+        // 任何一层 SELECT 的列表都不该是空的
+        for sql in [&first, &after_filter] {
+            assert!(!sql.contains("SELECT ,"), "{sql}");
+            assert!(!sql.contains(", ,"), "{sql}");
+        }
     }
 
     #[test]

@@ -57,3 +57,5 @@ Rust 2024 · 手写递归下降解析（原型实现选择；Chumsky 为路线�
 后端路线：**DuckDB SQL（M0 已实现）→ Polars（M3）→ Cranelift / MLIR（M4 原生执行后端，保留并持续推进研究原型）**。
 
 M0 明确不做：Polars/多后端、另写解释器、自建 Physical Plan、Arrow 全栈、自研 storage；having/cast/时间函数/coalesce/split 按计划后置。
+
+已知限制（如实记录）：DuckDB 后端为每个算子生成一层嵌套子查询，连续约 300 个算子以上引擎无法执行（实测，见第 6 章）；语义阶段一次只报出一个错误（第 9 章解决）。

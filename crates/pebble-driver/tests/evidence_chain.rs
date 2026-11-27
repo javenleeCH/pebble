@@ -323,5 +323,96 @@ fn nonfinite_f64_input_fails_run001_when_duckdb_present() {
     }
 }
 
+/// 回归（M0 遗留，第 8 章之后发现）：`extend` / `join` 直接接在源后面时 codegen 出错——
+/// extend 编译失败；join 编译「成功」却生成 `SELECT , …`，到 DuckDB 上才报语法错误。
+///
+/// 现有的「全部样例可编译」只检查 build 成功，所以样例 02（join 是第一个算子）一直是坏的
+/// 却没人发现。这条测试把两种写法真的跑起来，并核对输出的每一行。
+#[test]
+fn extend_and_join_directly_on_source_run_when_duckdb_present() {
+    set_repo_cwd();
+    if !duckdb_available() {
+        eprintln!("跳过首算子回归：未找到 duckdb CLI");
+        return;
+    }
+    let tmp = repo().join("target").join("pebble-it-first-op");
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+
+    // 样例数据：每行 order_id,status,amount,score,customer_id
+    let orders: Vec<Vec<String>> = std::fs::read_to_string(repo().join("tests/data/orders.csv"))
+        .unwrap()
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .skip(1)
+        .map(|l| l.split(',').map(str::to_string).collect())
+        .collect();
+    assert!(orders.len() >= 2, "测试数据至少两行");
+    let mut by_order = orders.clone();
+    by_order.sort_by(|a, b| {
+        a[0].parse::<i64>()
+            .unwrap()
+            .cmp(&b[0].parse::<i64>().unwrap())
+    });
+
+    // 输出摘要形如「N 行结果：\n<各行>」，最多带 11 行
+    fn body(summary: &str) -> Vec<&str> {
+        summary.lines().skip(1).collect()
+    }
+    let expected_summary_lines = format!("{} 行结果：", orders.len());
+
+    // 1. extend 是第一个算子：常量列对每一行都成立
+    let extend_src = tmp.join("extend_first.pebble");
+    std::fs::write(
+        &extend_src,
+        "Table(\"tests/data/orders.csv\") as o\n  .extend({ tag = \"x\", one = 1 })\n  .select(order_id, tag, one)\n  .collect()\n",
+    )
+    .unwrap();
+    let out = tmp.join("extend");
+    cmd_build(&extend_src, &locks_dir(), &out, None)
+        .expect("build：extend 作为第一个算子是合法程序");
+    let outcome = cmd_run(&out, None).expect("run");
+    assert!(
+        outcome.ok,
+        "extend 作为第一个算子必须能执行: {:?}",
+        outcome.output_summary
+    );
+    let summary = outcome.output_summary.expect("collect 输出摘要");
+    assert!(summary.starts_with(&expected_summary_lines), "{summary}");
+    for line in body(&summary) {
+        let parts: Vec<&str> = line.split(',').collect();
+        assert_eq!(parts.len(), 3, "{line}");
+        assert_eq!(parts[1], "x", "{line}");
+        assert_eq!(parts[2], "1", "{line}");
+    }
+    assert!(cmd_verify(&out.join("manifest.json"), &outcome.receipt_path).is_ok());
+
+    // 2. join 是第一个算子（按 order_id 自连接）：每行的 order_id 与 customer_id 来自同一行订单
+    let join_src = tmp.join("join_first.pebble");
+    std::fs::write(
+        &join_src,
+        "Table(\"tests/data/orders.csv\") as a\n  .join(Table(\"tests/data/orders.csv\") as b, on = a.order_id == b.order_id)\n  .select(a.order_id, b.customer_id)\n  .sort(a.order_id)\n  .collect()\n",
+    )
+    .unwrap();
+    let out = tmp.join("join");
+    cmd_build(&join_src, &locks_dir(), &out, None).expect("build");
+    let outcome = cmd_run(&out, None).expect("run");
+    assert!(
+        outcome.ok,
+        "join 作为第一个算子生成的 SQL 必须能被 DuckDB 执行: {:?}",
+        outcome.output_summary
+    );
+    let summary = outcome.output_summary.expect("collect 输出摘要");
+    assert!(summary.starts_with(&expected_summary_lines), "{summary}");
+    let got = body(&summary);
+    let shown = got.len().min(11);
+    for (line, order) in got.iter().zip(by_order.iter()) {
+        let expected = format!("{},{}", order[0], order[4]);
+        assert_eq!(*line, expected, "自连接后每一行都应来自同一条订单");
+    }
+    assert_eq!(shown, orders.len().min(11), "{summary}");
+    assert!(cmd_verify(&out.join("manifest.json"), &outcome.receipt_path).is_ok());
+}
+
 #[allow(dead_code)]
 fn unused(_: &Path) {}

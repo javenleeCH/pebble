@@ -6,3 +6,7 @@ rust-version.workspace = true
 
 [dependencies]
 pebble-hir = { path = "../pebble-hir" }
+
+[dev-dependencies]
+# 仅测试用：手工搭建 HIR 时需要 Span
+pebble-diagnostic = { path = "../pebble-diagnostic" }

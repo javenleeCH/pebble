@@ -12,8 +12,7 @@ use std::fmt::Write as _;
 
 /// 生成关系代数单行公式（LaTeX 数学模式片段）。
 pub fn algebra_view(hir: &Hir) -> String {
-    let names = field_names(hir);
-    let mut formula = emit_node(hir, hir.root, &names);
+    let mut formula = algebra_formulas(hir)[hir.root as usize].clone();
     if let HirNode::Terminal {
         kind: pebble_hir::TerminalKind::Write { path },
         ..
@@ -55,102 +54,114 @@ fn field_names(hir: &Hir) -> BTreeMap<FieldId, String> {
     names
 }
 
-fn emit_node(hir: &Hir, id: pebble_hir::NodeId, names: &BTreeMap<FieldId, String>) -> String {
-    match &hir.nodes[id as usize] {
-        HirNode::Source { source, kind, .. } => match kind {
-            SourceKind::Table { locator, .. } => {
-                format!("R_{{{}}}", escape(&locator.replace('\\', "")))
+/// 自底向上生成每个节点的代数式，按节点编号存放。
+///
+/// 与 DuckDB codegen 是同一个道理：HIR 的节点按拓扑序存放，生成某节点时它的输入早已就绪，
+/// 直接从数组里取即可，不必「先递归地生成内层」——n 个算子的流水线不该在调用栈上叠 n 层。
+fn algebra_formulas(hir: &Hir) -> Vec<String> {
+    let owned = field_names(hir);
+    let names = &owned;
+    let mut out: Vec<String> = Vec::with_capacity(hir.nodes.len());
+    for node in &hir.nodes {
+        let text = match node {
+            HirNode::Source { source, kind, .. } => match kind {
+                SourceKind::Table { locator, .. } => {
+                    format!("R_{{{}}}", escape(&locator.replace('\\', "")))
+                }
+                SourceKind::MemoryTable { name, .. } => {
+                    let _ = source;
+                    format!("M_{{{}}}", escape(name))
+                }
+            },
+            HirNode::Transform { base, kind } => {
+                let inner = &out[base.inputs[0] as usize];
+                match kind {
+                    TransformKind::Filter { pred } => {
+                        format!(
+                            "\\sigma_{{{}}}\\left({}\\right)",
+                            emit_expr(pred, names),
+                            inner
+                        )
+                    }
+                    TransformKind::Extend { bindings } => {
+                        let list: Vec<String> = bindings
+                            .iter()
+                            .map(|b| format!("{}={}", escape(&b.name), emit_expr(&b.value, names)))
+                            .collect();
+                        format!(
+                            "\\varepsilon_{{{}}}\\left({}\\right)",
+                            list.join(",\\; "),
+                            inner
+                        )
+                    }
+                    TransformKind::Select { projections } => {
+                        let list: Vec<String> =
+                            projections.iter().map(|p| escape(&p.name)).collect();
+                        format!("\\pi_{{{}}}\\left({}\\right)", list.join(",\\; "), inner)
+                    }
+                    TransformKind::Distinct => format!("\\delta\\left({}\\right)", inner),
+                    TransformKind::Sort { keys } => {
+                        let list: Vec<String> = keys
+                            .iter()
+                            .map(|k| {
+                                let name = emit_expr(&k.expr, names);
+                                if k.descending {
+                                    format!("{}\\downarrow", name)
+                                } else {
+                                    format!("{}\\uparrow", name)
+                                }
+                            })
+                            .collect();
+                        format!("\\tau_{{{}}}\\left({}\\right)", list.join(",\\; "), inner)
+                    }
+                    TransformKind::Take { n } => {
+                        format!("\\mathrm{{top}}_{{{}}}\\left({}\\right)", n, inner)
+                    }
+                    TransformKind::Join { on } => {
+                        let right = &out[base.inputs[1] as usize];
+                        format!(
+                            "\\left({}\\right) \\bowtie_{{{}}} \\left({}\\right)",
+                            inner,
+                            emit_expr(on, names),
+                            right
+                        )
+                    }
+                }
             }
-            SourceKind::MemoryTable { name, .. } => {
-                let _ = source;
-                format!("M_{{{}}}", escape(name))
+            HirNode::Aggregate {
+                base,
+                group_keys,
+                bindings,
+            } => {
+                let inner = &out[base.inputs[0] as usize];
+                let keys: Vec<String> = group_keys.iter().map(|k| escape(&k.name)).collect();
+                let aggs: Vec<String> = bindings
+                    .iter()
+                    .map(|b| {
+                        let func = agg_symbol(&b.call.func);
+                        let arg = b
+                            .call
+                            .arg
+                            .as_ref()
+                            .map(|a| emit_expr(a, names))
+                            .unwrap_or_default();
+                        format!("{}={}({})", escape(&b.name), func, arg)
+                    })
+                    .collect();
+                let mut spec = keys.join(",\\; ");
+                if !aggs.is_empty() {
+                    if !spec.is_empty() {
+                        spec.push_str(";\\; ");
+                    }
+                    spec.push_str(&aggs.join(",\\; "));
+                }
+                format!("\\gamma_{{{}}}\\left({}\\right)", spec, inner)
             }
-        },
-        HirNode::Transform { base, kind } => {
-            let inner = emit_node(hir, base.inputs[0], names);
-            match kind {
-                TransformKind::Filter { pred } => {
-                    format!(
-                        "\\sigma_{{{}}}\\left({}\\right)",
-                        emit_expr(pred, names),
-                        inner
-                    )
-                }
-                TransformKind::Extend { bindings } => {
-                    let list: Vec<String> = bindings
-                        .iter()
-                        .map(|b| format!("{}={}", escape(&b.name), emit_expr(&b.value, names)))
-                        .collect();
-                    format!(
-                        "\\varepsilon_{{{}}}\\left({}\\right)",
-                        list.join(",\\; "),
-                        inner
-                    )
-                }
-                TransformKind::Select { projections } => {
-                    let list: Vec<String> = projections.iter().map(|p| escape(&p.name)).collect();
-                    format!("\\pi_{{{}}}\\left({}\\right)", list.join(",\\; "), inner)
-                }
-                TransformKind::Distinct => format!("\\delta\\left({}\\right)", inner),
-                TransformKind::Sort { keys } => {
-                    let list: Vec<String> = keys
-                        .iter()
-                        .map(|k| {
-                            let name = emit_expr(&k.expr, names);
-                            if k.descending {
-                                format!("{}\\downarrow", name)
-                            } else {
-                                format!("{}\\uparrow", name)
-                            }
-                        })
-                        .collect();
-                    format!("\\tau_{{{}}}\\left({}\\right)", list.join(",\\; "), inner)
-                }
-                TransformKind::Take { n } => {
-                    format!("\\mathrm{{top}}_{{{}}}\\left({}\\right)", n, inner)
-                }
-                TransformKind::Join { on } => {
-                    let right = emit_node(hir, base.inputs[1], names);
-                    format!(
-                        "\\left({}\\right) \\bowtie_{{{}}} \\left({}\\right)",
-                        inner,
-                        emit_expr(on, names),
-                        right
-                    )
-                }
-            }
-        }
-        HirNode::Aggregate {
-            base,
-            group_keys,
-            bindings,
-        } => {
-            let inner = emit_node(hir, base.inputs[0], names);
-            let keys: Vec<String> = group_keys.iter().map(|k| escape(&k.name)).collect();
-            let aggs: Vec<String> = bindings
-                .iter()
-                .map(|b| {
-                    let func = agg_symbol(&b.call.func);
-                    let arg = b
-                        .call
-                        .arg
-                        .as_ref()
-                        .map(|a| emit_expr(a, names))
-                        .unwrap_or_default();
-                    format!("{}={}({})", escape(&b.name), func, arg)
-                })
-                .collect();
-            let mut spec = keys.join(",\\; ");
-            if !aggs.is_empty() {
-                if !spec.is_empty() {
-                    spec.push_str(";\\; ");
-                }
-                spec.push_str(&aggs.join(",\\; "));
-            }
-            format!("\\gamma_{{{}}}\\left({}\\right)", spec, inner)
-        }
-        HirNode::Terminal { base, .. } => emit_node(hir, base.inputs[0], names),
+            HirNode::Terminal { base, .. } => out[base.inputs[0] as usize].clone(),
+        };
+        out.push(text);
     }
+    out
 }
 
 fn agg_symbol(f: &AggFunc) -> &'static str {
@@ -253,10 +264,106 @@ fn escape(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pebble_diagnostic::Span;
+    use pebble_hir::{
+        FieldOrigin, FieldSchema, Hash, Literal, NodeBase, NodeId, Schema, TerminalKind,
+    };
 
     #[test]
     fn escapes_latex_specials() {
         assert!(escape("a_b&c").contains("\\_"));
         assert!(escape("x&y").contains("\\&"));
+    }
+
+    /// n 个 filter 串成一条流水线的 HIR。手工搭建：本 crate 只依赖 pebble-hir。
+    fn long_chain(n: usize) -> Hir {
+        let span = Span::new(0, 0);
+        let schema = Schema {
+            fields: vec![FieldSchema {
+                id: 0,
+                name: "amount".into(),
+                ty: Type::I64,
+                origin: FieldOrigin::Source {
+                    source: 0,
+                    source_field: "amount".into(),
+                },
+            }],
+        };
+        let mut nodes = Vec::with_capacity(n + 2);
+        nodes.push(HirNode::Source {
+            base: NodeBase {
+                id: 0,
+                inputs: vec![],
+                output: schema.clone(),
+                span,
+            },
+            source: 0,
+            kind: SourceKind::Table {
+                locator: "t.csv".into(),
+                schema_lock_hash: Hash([0u8; 32]),
+            },
+        });
+        for i in 1..=n {
+            let id = i as NodeId;
+            nodes.push(HirNode::Transform {
+                base: NodeBase {
+                    id,
+                    inputs: vec![id - 1],
+                    output: schema.clone(),
+                    span,
+                },
+                kind: TransformKind::Filter {
+                    pred: THirExpr::Binary {
+                        op: BinOp::Gt,
+                        left: Box::new(THirExpr::Field {
+                            field: 0,
+                            ty: Type::I64,
+                            span,
+                        }),
+                        right: Box::new(THirExpr::Literal {
+                            value: Literal::Int(1),
+                            ty: Type::I64,
+                            span,
+                        }),
+                        ty: Type::Opt(Box::new(Type::Bool)),
+                        span,
+                    },
+                },
+            });
+        }
+        let root = (n + 1) as NodeId;
+        nodes.push(HirNode::Terminal {
+            base: NodeBase {
+                id: root,
+                inputs: vec![n as NodeId],
+                output: schema.clone(),
+                span,
+            },
+            kind: TerminalKind::Collect,
+        });
+        Hir {
+            nodes,
+            root,
+            semantics_version: pebble_hir::SEMANTICS_VERSION.to_string(),
+        }
+    }
+
+    /// 回归：代数视图曾沿着流水线递归（`emit_node` 为了取内层调用自己），
+    /// 两万个算子的流水线会让编译器栈溢出。现在自底向上逐个生成。
+    ///
+    /// 在只有 256 KiB 栈的线程里给 2 000 个算子出视图：递归实现必然溢出，迭代实现不需要栈。
+    #[test]
+    fn algebra_view_of_a_long_pipeline_needs_no_call_stack() {
+        const N: usize = 2000;
+        const TINY_STACK: usize = 256 * 1024;
+        let hir = long_chain(N);
+        let handle = std::thread::Builder::new()
+            .stack_size(TINY_STACK)
+            .spawn(move || {
+                let formula = algebra_view(&hir);
+                assert_eq!(formula.matches("\\sigma_").count(), N, "每个 filter 一个 σ");
+            })
+            .expect("spawn");
+        handle.join().expect("渲染线程不应 panic");
     }
 }

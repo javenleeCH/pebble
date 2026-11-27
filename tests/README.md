@@ -1,6 +1,6 @@
 # 测试与验收
 
-> 测试体系：`cargo test` 全绿（96 项）；证据链集成测试在真实 DuckDB 1.4.x 上执行。
+> 测试体系：`cargo test` 全绿（102 项）；证据链集成测试在真实 DuckDB 1.4.x 上执行。
 
 ## 单元测试（随 crate）
 
@@ -10,8 +10,8 @@
 | `pebble-parser` | 全部样例可解析；LEX-001（`|`/`^`）、PAR-003~007、PAR-002（终端后接算子）、SEM-016（字面量越界）；**错误恢复矩阵**（`tests/recovery.rs`，37 项）：多错误一次报告、三道同步点、词法洞不重复报错、残骸模式（恢复不制造诊断）、流水线层多余 token 与 PAR-002 之后继续解析、提示只说站得住的话、嵌套/长度上限不崩溃、词法边角（BOM、全角标点、隐形字符）、病态输入不死循环 |
 | `pebble-hir` | lock 哈希稳定性与篡改检测、manifest/receipt 绑定、工件哈希确定性 |
 | `pebble-semantics` | M0 lowering + 哈希确定性、注释不影响 hash（含中文注释）、语义变更改变 hash、流敏收缩、聚合签名、SEM/SCH 错误矩阵（001/003/004/005/007/008/010/011/012/014/016、SCH-001/002/004） |
-| `pebble-duckdb` | canonical SQL 前言（threads=1）、判空 IS NOT NULL、sum checked 守卫（HUGEINT 范围）、nulls last、f64 规范化、round ties-to-even |
-| `pebble-latex` | LaTeX 转义 |
+| `pebble-duckdb` | canonical SQL 前言（threads=1）、判空 IS NOT NULL、sum checked 守卫（HUGEINT 范围）、nulls last、f64 规范化、round ties-to-even；`extend` / `join` 直接接在源后面时的 SELECT 列表（回归：曾分别报「无来源」与生成 `SELECT , …`） |
+| `pebble-latex` | LaTeX 转义；长流水线的代数视图不需要调用栈（在 256 KiB 栈的线程里给 2000 个算子出视图） |
 
 ## 诊断集成测试（pebble-driver/tests/diagnostics.rs）
 
@@ -34,13 +34,21 @@
 
 ## 集成测试（pebble-driver/tests/evidence_chain.rs）
 
-1. **all_examples_compile**：examples/ 全部 7 个样例编译通过（含 lock 绑定）。
+1. **all_examples_compile**：examples/ 全部 7 个样例编译通过（含 lock 绑定）。注意它只证明「能编译」——能执行由第 8 项和端到端测试证明。
 2. **build_is_deterministic**：重复编译 → hir/artifact/manifest 三哈希一致。
 3. **verify_binds_receipt_to_manifest_and_detects_tamper**：一致 receipt → APPROVED；篡改 receipt 工件哈希 / 篡改 manifest 本体 → VERIFY FAILED。
 4. **run_without_duckdb_writes_failed_receipt**：引擎缺失 → RUN-003 receipt；工件绑定仍成立。
 5. **end_to_end_demo_when_duckdb_present**：00_m0_revenue 端到端，输出行核对（c2/c6、过滤与 null 语义生效）→ verify APPROVED。
 6. **toctou_data_tamper_fails_run002_when_duckdb_present**：build 后篡改数据文件 → run 拒绝执行（RUN-002）。
 7. **nonfinite_f64_input_fails_run001_when_duckdb_present**：f64 列含 inf → RUN-001 预检拒绝。
+8. **extend_and_join_directly_on_source_run_when_duckdb_present**：`extend` / `join` 作为第一个算子的程序在真实 DuckDB 上执行，逐行核对输出（回归，见第 6 章）。
+
+## 长流水线回归（pebble-duckdb/tests/long_pipeline.rs）
+
+**codegen_of_a_long_pipeline_needs_no_call_stack**：在一个只有 256 KiB 栈的线程里，给 2000 个算子的流水线做 codegen。
+递归实现会栈溢出（测试进程崩溃），迭代实现不需要栈。编译器不再因流水线过长而崩溃。
+
+（引擎一侧的上限是另一回事：DuckDB 实测连续约 300 个算子以上无法执行，见第 6 章。）
 
 ## 验收规则（docs/design-decisions.md §7）
 

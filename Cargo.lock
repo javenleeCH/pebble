@@ -232,6 +232,7 @@ dependencies = [
 name = "pebble-latex"
 version = "0.1.0"
 dependencies = [
+ "pebble-diagnostic",
  "pebble-hir",
 ]
 

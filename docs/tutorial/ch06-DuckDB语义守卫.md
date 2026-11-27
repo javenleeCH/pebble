@@ -6,7 +6,8 @@
 
 1. 学会把语言语义「翻译」而不是「直译」成目标 SQL；
 2. 逐个实现语义守卫：判空、整数 checked、f64 规范化、round ties-to-even、排序 null 位置；
-3. 明确信任边界：什么被证据链绑定，什么必须信任 DuckDB。
+3. 明确信任边界：什么被证据链绑定，什么必须信任 DuckDB；
+4. 认识 codegen 的两个结构性陷阱——列的来源取错了一层、为了取内层而递归——以及「能编译 ≠ 能执行」对测试意味着什么。
 
 ## 为什么后端是最容易背叛语义的一层
 
@@ -93,6 +94,136 @@ SELECT ... ;
 
 列名一律 `f<field_id>`（第 5 章的身份直通后端），只在最外层 select 才出现用户可见名——中间层根本不存在「重名字段」问题。
 
+## 一层套一层：流水线怎么变成 SQL
+
+先把结构说清楚，下面两个 bug 都出在这里。HIR 的每个节点被翻译成**一层子查询**，包住它的输入：
+
+```text
+Table("orders.csv")        →  SELECT "t0"."status" AS "f0", … FROM read_csv(…) AS "t0"
+  .filter(o.amount > 1)    →  SELECT "f0", "f1", "f2" FROM ( …上一层… ) AS "s1" WHERE (…)
+  .extend({ x = 1 })       →  SELECT "f0", "f1", "f2", 1 AS "f3" FROM ( …上一层… ) AS "s2"
+```
+
+三个算子就是三层嵌套。列名一律是 `f<字段 id>`，所以每一层只做一件事：决定**输出哪些列**。
+
+`extend` 这一层的规则：输出字段要么是从输入**透传**来的（写 `"fN"`），要么是本层某个绑定算出来的（写 `<表达式> AS "fN"`）。`join` 这一层的规则：左表的列加右表的列，各出现一次。
+
+### 病例一：「输入的输入」——编译通过的坏 SQL
+
+两条规则都得先知道「输入有哪些列」。取这件事的辅助函数，最初写成了这样：
+
+```rust
+fn input_schema_ids(&self, node_id: NodeId) -> BTreeSet<FieldId> {
+    for &input in &self.hir.nodes[node_id].base().inputs {    // ← 取的是 node_id 的「输入」
+        for f in &self.hir.nodes[input].base().output.fields { … }
+    }
+}
+```
+
+它返回的不是「节点 `node_id` 的输出列」，而是「`node_id` 的**输入**的输出列」——多套了一层，而调用方要的是前者。
+
+于是：
+
+- `extend` 直接接在源后面：源的「输入」是空集，透传列一个都找不到，报 `extend 输出字段 f0 无来源`。合法程序被拒绝，退出码 1。
+- `join` 直接接在源后面：左表的列一个都列不出来，生成 `SELECT , "f0", "f1", …`。注意这**不会让编译失败**——SQL 只是一个字符串，编译器并不检查它合不合语法。坏 SQL 进了 manifest，`pebble build` 报告成功；要到 `pebble run` 时 DuckDB 才说 `Parser Error: syntax error at or near ","`。
+- 它们前面只要隔着一个别的算子（比如 `.filter`），结果又碰巧是对的。
+
+最后一条解释了这个 bug 为什么能活到现在：全部样例都「能编译」，而样例 02 恰好是 `join` 直接接在源后面——它的 `plan.sql` 一直是坏的，只是从来没有被真正执行过。
+
+| 写法 | 修复前 | 修复后 |
+|---|---|---|
+| `.extend({ x = o.amount + 1 })` 作为第一个算子 | 编译失败 | 正常 |
+| `.filter(…).extend({ x = 1 })` | 正常 | 正常 |
+| `.join(…)` 作为第一个算子 | **编译成功，SQL 是坏的** | 正常 |
+| `.filter(…).join(…)` | 能跑，但左表的列出现两遍 | 正常 |
+
+两条教训都很值钱：
+
+1. **症状不是病因。** 这个问题最初被报告为「`extend` 里写常量绑定会失败」。听起来合理，却是错的：`.filter(…).extend({ x = 1 })` 一切正常，`.extend({ x = o.amount + 1 })` 反而失败。找到病因靠的是把四种形状各跑一遍（上表），而不是盯着被报告的那一个。
+2. **「能编译」不等于「能执行」。** 后端的测试如果只断言 build 成功，就等于没测后端。所以这次的回归测试里，专门有一条在真实 DuckDB 上把 `extend`、`join` 直接接在源后面的程序跑起来，并核对输出的每一行。
+
+修复之后，7 个样例里只有样例 02 的 SQL 变了，其余 6 个逐字节不变。修 bug 时顺手证明「没改坏别的」，这个对照值得每次都做。
+
+### 病例二：为了取「内层」而递归
+
+既然每个节点包住它的输入，最顺手的写法是递归：
+
+```rust
+fn emit_node(&self, id: NodeId) -> Result<String, String> {
+    let inner = self.emit_node(base.inputs[0])?;    // 先递归地生成内层
+    Ok(format!("SELECT … FROM ({inner}) AS …"))
+}
+```
+
+n 个算子的流水线，就在调用栈上叠 n 层。两万个 `.filter` 连起来，编译器栈溢出，一条诊断都没有。这和第 8 章「别把调用栈撑爆」是同一个教训，只是换了一层：那次是表达式递归，这次是流水线递归。
+
+这里的解法比设上限更好，因为**根本不需要递归**。HIR 的节点是按拓扑序存放的：每个节点都排在它的输入之后。按存放顺序从前往后逐个生成，轮到某个节点时，它的输入早就生成好了，直接从数组里取：
+
+```rust
+    fn emit_all(&self) -> Result<Vec<String>, String> {
+        let mut sql = Vec::with_capacity(self.hir.nodes.len());
+        for (i, node) in self.hir.nodes.iter().enumerate() {
+            // 防御：若某个输入排在消费者之后（或不存在），下标取值就会错——明确报内部错误
+            if let Some(bad) = node
+                .base()
+                .inputs
+                .iter()
+                .find(|&&input| input as usize >= i)
+            {
+                return Err(format!(
+                    "内部错误：节点 {i} 的输入 {bad} 未排在它之前（HIR 不是拓扑序）"
+                ));
+            }
+            let text = match node {
+                HirNode::Source { base, source, kind } => self.emit_scan(base.id, *source, kind)?,
+                HirNode::Transform { base, kind } => self.emit_transform(base, kind, &sql)?,
+                HirNode::Aggregate {
+                    base,
+                    group_keys,
+                    bindings,
+                } => self.emit_aggregate(base, group_keys, bindings, &sql)?,
+                HirNode::Terminal { .. } => String::new(), // 终端由 final_select 负责
+            };
+            sql.push(text);
+        }
+        Ok(sql)
+    }
+```
+
+同一个仓库里，「沿着输入走」一共有三样办法，各管一类情形：
+
+| 场景 | 办法 | 例子 |
+|---|---|---|
+| 递归深度由用户的嵌套决定，嵌套本身就是语言结构 | **设上限**，超过就报诊断 | 表达式嵌套 64 层（第 8 章） |
+| 节点已经排好拓扑序 | **自底向上**循环，结果存进数组 | SQL codegen、LaTeX 视图 |
+| 要反向走，或者要判断有没有环 | **显式栈** | `Hir::validate` |
+
+### 怎么测「会不会栈溢出」
+
+两万个算子的流水线，测试里跑一遍要十几秒，太慢。换个思路：不放大输入，**缩小栈**。
+
+```rust
+std::thread::Builder::new()
+    .stack_size(256 * 1024)    // 256 KiB
+    .spawn(move || { /* 给 2 000 个算子的流水线做 codegen */ })
+```
+
+递归实现在 256 KiB 的栈上叠 2 000 层，必然溢出；迭代实现根本不碰栈。这条测试在修复前会让测试进程直接崩溃（`thread '<unknown>' has overflowed its stack`，CI 红灯），修复后 0.07 秒跑完。SQL codegen 和 LaTeX 视图各有一条（`crates/pebble-duckdb/tests/long_pipeline.rs`、`pebble-latex` 的单测）。
+
+### 诚实的边界：引擎也有上限
+
+编译器不再崩溃了，但「一个算子一层子查询」这种 SQL 形态本身有极限。在 DuckDB 1.4.1 上实测，连续 `.filter` 的个数：
+
+| 个数 | 结果 |
+|---|---|
+| 300 | 正常运行 |
+| 350–450 | **DuckDB 自己栈溢出**（回执里记着退出码 `-1073741571`） |
+| 500 及以上 | DuckDB 解析器拒绝：`Max expression depth limit of 1000 exceeded` |
+
+也就是说，超过三百个算子的流水线，目前的 M0 后端执行不了。失败会被如实记进回执（第 7 章：失败也是证据），不会悄悄出错，但这终究是个限制。根治的办法是换一种 SQL 形态：把连续的行级算子融合进**同一层** `SELECT`（多个 `filter` 合成一个 `WHERE`，`extend` 进 `select` 列表，`sort` + `take` 进 `ORDER BY` / `LIMIT`），只在聚合、连接这类必须分层的地方才开新的子查询。它会改变所有程序的 canonical SQL，所以要当作一次工件版本升级（`artifact v2`）来对待。
+
+还有一个已知的小代价：每生成一层都要把内层的 SQL 复制一遍，n 层的总复制量是 O(n²)。现实中的流水线只有几十个算子，感觉不到；但心里要有数。
+
 ## 聚合的守卫
 
 - `sum(i64)`：HUGEINT 中转 + 范围检查（同加法）+ 空集合 → NULL；
@@ -110,7 +241,21 @@ SELECT ... ;
 ## 跑起来
 
 ```powershell
-cargo test -p pebble-duckdb
+cargo test -p pebble-duckdb                 # 含「extend / join 直接接在源后面」的回归
+cargo test --workspace --test long_pipeline # 在 256 KiB 的栈上给 2 000 个算子做 codegen
+cargo test --workspace --test evidence_chain extend_and_join -- --nocapture   # 在真实 DuckDB 上跑一遍（缺 duckdb 时跳过）
+
+# 亲手看「一个算子一层子查询」长什么样：
+@'
+Table("tests/data/orders.csv") as o
+  .filter(o.amount > 1)
+  .extend({ x = 1 })
+  .collect()
+'@ | Set-Content examples/shape.pebble
+cargo run -q -p pebble-driver -- build examples/shape.pebble --locks tests/locks
+Get-Content examples/target/pebble/shape/plan.sql
+Remove-Item examples/shape.pebble
+
 # 看守卫的实际产物：
 cargo run -p pebble-driver -- build examples/00_m0_revenue.pebble --locks tests/locks
 Select-String -Path examples/target/pebble/00_m0_revenue/plan.sql -Pattern "HUGEINT|IS NOT NULL|NULLS LAST"
@@ -122,3 +267,6 @@ Select-String -Path examples/target/pebble/00_m0_revenue/plan.sql -Pattern "HUGE
 2. **MOD 符号验证**：Pebble 规范说 `%` 结果符号随被除数。查 DuckDB 行为并写测试钉住；如果它随除数，你需要在守卫里补什么？（提示：`sign(r)*abs(x)%abs(r)` 模式）
 3. **write 的 CSV null 表示**：DuckDB 默认把 NULL 写成空串。规范没定义 null 的 CSV 序列化——先在 06-operators 补规范，再改 codegen，体会「规范先行」的顺序。
 4. **思考题**：如果把 `SET threads TO 1` 去掉，哪些现有测试会挂？哪些**永远不会**挂但语义已经悄悄不可复现？（提示：整数聚合 vs 浮点聚合）
+5. **融合**：把连续的 `filter` 合并进同一层 `WHERE`。动手前先想清楚三件事：canonical SQL 变了，对已经审批过的 manifest 意味着什么？第 4 章的流敏收缩会不会因为合并而改变？工件要不要升版本号？
+6. **O(n²) 的复制**：`emit_all` 每生成一层都要复制内层的 SQL。改用一个显式栈，把各层的前缀和后缀直接写进同一个 `String`，让总代价变成 O(n)。（提示：只有一个输入的节点，输出的是「前缀 + 内层 + 后缀」。）
+7. **找引擎的上限**：用二分法找出 DuckDB 能接受的最大连续算子数。编译器该不该在编译期就拒绝超过它的流水线？说说利弊。（提示：规范要求后端能力诊断使用独立类别，不能替代语言诊断。）
