@@ -271,7 +271,7 @@ receipt 记录 manifest hash、实际提交 SQL hash、引擎版本、输入校�
 - `pebble-diagnostic`：Span/错误码（LEX-001~004、PAR-001~007、SEM-001~017、SCH-001~006、RUN-001~004）与源码级渲染。
 - `pebble-parser`：手写递归下降（原型实现选择；Chumsky 属路线草案），全部 P0 文法（extend/select as/on =/尾逗号/if 修正）。
 - `pebble-hir`：typed HIR + 稳定 FieldId/SourceId + canonical 序列化/SHA-256 + Schema lock + BackendArtifact/Manifest/Receipt/verify。
-- `pebble-semantics`：解析域、严格 null 传播、判空 lowering、Kleene、NN(p) 收缩、checked-null 与 SEM-016 常量定义域、聚合签名、历史作用域区分 SEM-001/012。
+- `pebble-semantics`：解析域、严格 null 传播、判空 lowering、Kleene、NN(p) 收缩、checked-null 与 SEM-016 常量定义域、聚合签名、历史作用域区分 SEM-001/012；多错误报告与毒化（第 9 章）。
 - `pebble-duckdb`：canonical SQL（threads=1）、IS NOT NULL、HUGEINT checked 守卫、f64 isfinite/+0.0 规范化、round ties-to-even、NULLS LAST、group/distinct 值同一性。
 - `pebble-latex`：最小单向 σ/ε/π/γ/τ/topN 审计视图。
 - `pebble-driver`：`build` / `run` / `verify` / `lock` 四个子命令与四幕验收（含 TOCTOU 数据哈希、RUN-001 f64 预检、RUN-003 工件缺失）。
@@ -279,6 +279,8 @@ receipt 记录 manifest hash、实际提交 SQL hash、引擎版本、输入校�
 
 四幕验收结果：重复编译三哈希一致；语义变更（10000→9999）旧审批失效；注释变更哈希不变；数据篡改（RUN-002）与非有限输入（RUN-001）均被拒绝；SEM-011 歧义诊断带候选提示。
 
-已知限制（2026-11-27 实测，见教程第 6 章）：DuckDB 后端为每个算子生成一层嵌套子查询，连续约 300 个算子以上引擎无法执行——350–450 层时 DuckDB 自身栈溢出，500 层以上解析器报 `Max expression depth limit of 1000`。失败由回执如实记录，不会静默出错；根治需要 codegen 融合（连续行级算子合并进同一层 SELECT），并作为工件版本升级发布。语义阶段目前遇到首个 Error 即停止。
+已知限制（2026-11-27 实测，见教程第 6 章）：DuckDB 后端为每个算子生成一层嵌套子查询，连续约 300 个算子以上引擎无法执行——350–450 层时 DuckDB 自身栈溢出，500 层以上解析器报 `Max expression depth limit of 1000`。失败由回执如实记录，不会静默出错；根治需要 codegen 融合（连续行级算子合并进同一层 SELECT），并作为工件版本升级发布。
+
+语义阶段（第 9 章）一次报出全部独立的错误；定义失败的名字被毒化，其后果不再重复报告。
 
 下一步（按序）：威胁模型与恶意查询测试集 → 更多语义边界测试（Kleene 反例矩阵、除零/溢出动态用例）→ v0.1.1（having/cast 少量子集）→ M2 证据签名与 verifier 独立化 → M3 Polars 第二后端 → M4 Cranelift/MLIR 原生后端路线推进。

@@ -17,6 +17,7 @@
 | 6 | 后端 codegen：不继承 DuckDB 默认行为 | [`tutorial/ch06-DuckDB语义守卫.md`](tutorial/ch06-DuckDB语义守卫.md) |
 | 7 | 落地：build/run/verify 证据链闭环 | [`tutorial/ch07-证据链.md`](tutorial/ch07-证据链.md) |
 | 8 | 解析器错误恢复：同步点、级联错误、阶段门控；Span 单位 bug 修复 | [`tutorial/ch08-解析器错误恢复.md`](tutorial/ch08-解析器错误恢复.md) |
+| 9 | 语义层错误恢复：毒化，让坏消息静默传播；codegen 两个 M0 遗留缺陷的修复记在第 6 章 | [`tutorial/ch09-语义层错误恢复.md`](tutorial/ch09-语义层错误恢复.md) |
 
 课程地图与开发纪律见 [`tutorial/README.md`](tutorial/README.md)。
 

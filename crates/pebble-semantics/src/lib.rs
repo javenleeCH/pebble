@@ -7,6 +7,8 @@
 //! - checked-null：可能失败运算静态类型必须可空；编译期可确定的定义域失败报 SEM-016；
 //! - 聚合签名按「全局/分组 × 参数可空 × 溢出」推导；
 //! - 源别名与输出字段名分属不同命名空间；join 重名裸引用报 SEM-011；
+//! - 多错误报告与毒化（第 9 章）：算子里相互独立的部分逐个检查，定义失败的名字被毒化，
+//!   之后对它的引用沉默地失败——一个根因只报一次，独立的错误一个不漏；
 //! - 语义封闭：本层不做任何「由实现定义」的放行。
 
 use pebble_diagnostic::{Code, DiagBag, Span};
@@ -67,12 +69,24 @@ pub fn compile(program: &ast::Program, catalog: &Catalog, diags: &mut DiagBag) -
         aliases: BTreeMap::new(),
         history: Vec::new(),
         const_failed: false,
+        poisoned: BTreeSet::new(),
     };
     let result = lower.run(&program.pipeline);
     if diags.has_error() {
         return None;
     }
-    result
+    match result {
+        Some(hir) => Some(hir),
+        // 没有诊断却没有结果：这是编译器自己的 bug。不能让用户面对一个沉默的失败
+        None => {
+            diags.push(pebble_diagnostic::Diagnostic::error(
+                Code::SemOpPosition,
+                "内部错误：语义检查中止，但没有产生任何诊断",
+                Span::new(0, 0),
+            ));
+            None
+        }
+    }
 }
 
 struct Lowerer<'a> {
@@ -86,9 +100,25 @@ struct Lowerer<'a> {
     history: Vec<Schema>,
     /// 同一常量定义域失败只报一次。
     const_failed: bool,
+    /// 毒化表：定义失败的字段。之后任何引用它们的表达式都**沉默地**失败——
+    /// 那是同一个根因的后果，再报一次就是级联错误（第 9 章）。
+    poisoned: BTreeSet<FieldId>,
 }
 
 impl Lowerer<'_> {
+    /// 沿流水线逐算子做解析域、Schema 与类型检查（08-diagnostics §8.6 第 3 条）。
+    ///
+    /// 遇到第一个错误就停，是最简单的正确做法——但那样拼错两个字段名就要编译两次。
+    /// 这里和第 8 章的解析器是同一套思想的另一半：
+    ///
+    /// - **独立的部分逐个解析**：extend 的每个绑定、select 的每一项、agg 的每个键与绑定、
+    ///   sort 的每个键。一个失败不影响同一算子里其余部分的检查。
+    /// - **失败的名字被毒化**：它的输出位置留一个占位并记入 `poisoned`；
+    ///   之后任何引用它的表达式**沉默地**失败（见 `resolve_field`）——那是同一个根因的后果。
+    /// - **算子不发射，流水线继续**：带着占位 Schema 往下走，后面的算子里独立的错误照常报出。
+    /// - **唯一的致命错误是「源未知」**：表的形状都不知道，后面无从检查，直接返回 `None`。
+    ///
+    /// 返回 `None` 只表示「有错误，没有 HIR」。带占位的中间节点会被丢弃（`compile` 统一把关）。
     fn run(&mut self, pipeline: &ast::Pipeline) -> Option<Hir> {
         // 1. 源节点
         let (mut current_id, mut current_schema) = self.lower_source(&pipeline.source)?;
@@ -110,7 +140,9 @@ impl Lowerer<'_> {
                             "group_by 之后必须且只能紧跟一个 agg",
                             *span,
                         );
-                        return None;
+                        // 跳过这个孤立的 group_by，继续检查后面的算子
+                        i += 1;
+                        continue;
                     };
                     let (node_id, schema) = self.lower_aggregate(
                         current_id,
@@ -118,9 +150,11 @@ impl Lowerer<'_> {
                         Some(keys),
                         agg_bindings,
                         *agg_span,
-                    )?;
-                    current_id = node_id;
+                    );
                     current_schema = schema;
+                    if let Some(n) = node_id {
+                        current_id = n;
+                    }
                     i += 2;
                 }
                 ast::Op::Agg {
@@ -134,59 +168,95 @@ impl Lowerer<'_> {
                         None,
                         bindings,
                         *agg_span,
-                    )?;
-                    current_id = node_id;
+                    );
                     current_schema = schema;
+                    if let Some(n) = node_id {
+                        current_id = n;
+                    }
                     i += 1;
                 }
                 ast::Op::Filter { pred, span } => {
                     self.history.push(current_schema.clone());
-                    let resolved = self.resolve_expr(pred, &current_schema, false)?;
-                    self.check_predicate(&resolved)?;
-                    self.const_domain_check(&resolved);
-                    let narrowed = self.narrow(&current_schema, &resolved);
-                    let node_id = self.push_node(vec![current_id], narrowed, *span, |base| {
-                        HirNode::Transform {
-                            base,
-                            kind: TransformKind::Filter { pred: resolved },
+                    // 谓词没能解析、或不是 bool：已报告，或是毒化。算子跳过，Schema 不变
+                    if let Some(resolved) = self.resolve_expr(pred, &current_schema, false) {
+                        if self.check_predicate(&resolved).is_some() {
+                            self.const_domain_check(&resolved);
+                            let narrowed = self.narrow(&current_schema, &resolved);
+                            let node_id =
+                                self.push_node(vec![current_id], narrowed, *span, |base| {
+                                    HirNode::Transform {
+                                        base,
+                                        kind: TransformKind::Filter { pred: resolved },
+                                    }
+                                });
+                            current_schema = self.nodes[node_id as usize].base().output.clone();
+                            current_id = node_id;
                         }
-                    });
-                    current_schema = self.nodes[node_id as usize].base().output.clone();
-                    current_id = node_id;
+                    }
                     i += 1;
                 }
                 ast::Op::Extend { record, span } => {
                     self.history.push(current_schema.clone());
-                    // 绑定名唯一（SEM-014）
-                    let mut seen = BTreeSet::new();
-                    for b in &record.bindings {
-                        if !seen.insert(b.name.clone()) {
+                    // 绑定名唯一（SEM-014）：后出现的重名报错并被丢弃
+                    let is_first = |idx: usize| {
+                        record.bindings[..idx]
+                            .iter()
+                            .all(|p| p.name != record.bindings[idx].name)
+                    };
+                    for (idx, b) in record.bindings.iter().enumerate() {
+                        if !is_first(idx) {
                             self.diags.error(
                                 Code::SemDuplicateName,
                                 format!("同一 extend 记录中名称 `{}` 重复", b.name),
                                 b.span,
                             );
-                            return None;
                         }
                     }
-                    // RHS 对输入行求值；兄弟绑定互不可见（环境即输入 Schema）
+                    // RHS 对输入行求值；兄弟绑定互不可见（环境即输入 Schema）。逐个绑定解析
                     let mut hir_bindings = Vec::new();
-                    for b in &record.bindings {
-                        let value = self.resolve_expr(&b.value, &current_schema, false)?;
-                        self.const_domain_check(&value);
-                        let output = self.fresh_field();
-                        hir_bindings.push(pebble_hir::Binding {
-                            output,
-                            name: b.name.clone(),
-                            value,
-                        });
+                    let mut failed = BTreeSet::new();
+                    for (idx, b) in record.bindings.iter().enumerate() {
+                        if !is_first(idx) {
+                            continue;
+                        }
+                        match self.resolve_expr(&b.value, &current_schema, false) {
+                            Some(value) => {
+                                self.const_domain_check(&value);
+                                let output = self.fresh_field();
+                                hir_bindings.push(pebble_hir::Binding {
+                                    output,
+                                    name: b.name.clone(),
+                                    value,
+                                });
+                            }
+                            None => {
+                                failed.insert(b.name.clone());
+                            }
+                        }
                     }
                     // 输出 Schema：覆盖留在原位并换身份；新增按绑定顺序追加
+                    let node = self.nodes.len() as NodeId;
                     let mut fields: Vec<FieldSchema> = Vec::new();
-                    let mut replaced: BTreeSet<String> = BTreeSet::new();
+                    let mut replaced = BTreeSet::new();
                     for f in &current_schema.fields {
-                        if let Some(b) = hir_bindings.iter().find(|b| b.name == f.name) {
-                            if current_schema.by_name(&f.name).len() > 1 {
+                        let binding = hir_bindings.iter().find(|b| b.name == f.name);
+                        let ambiguous = current_schema.by_name(&f.name).len() > 1;
+                        match binding {
+                            Some(b) if !ambiguous => {
+                                // 成功的覆盖：留在原位，换成新的身份
+                                replaced.insert(f.name.clone());
+                                fields.push(FieldSchema {
+                                    id: b.output,
+                                    name: f.name.clone(),
+                                    ty: b.value.ty().clone(),
+                                    origin: FieldOrigin::Derived {
+                                        node,
+                                        binding: f.name.clone(),
+                                    },
+                                });
+                            }
+                            Some(_) => {
+                                // 覆盖时输入有多个同名字段：无法确定覆盖的是哪一个
                                 self.diags.error(
                                     Code::SemTypeMismatch,
                                     format!(
@@ -195,128 +265,140 @@ impl Lowerer<'_> {
                                     ),
                                     *span,
                                 );
-                                return None;
+                                replaced.insert(f.name.clone());
+                                fields.push(self.poison_field(&f.name, node));
                             }
-                            replaced.insert(f.name.clone());
-                            fields.push(FieldSchema {
-                                id: b.output,
-                                name: f.name.clone(),
-                                ty: b.value.ty().clone(),
-                                origin: FieldOrigin::Derived {
-                                    node: self.nodes.len() as NodeId,
-                                    binding: f.name.clone(),
-                                },
-                            });
-                        } else {
-                            fields.push(f.clone());
+                            None if failed.contains(&f.name) => {
+                                // 这个名字指向的是一个失败的新定义：占位并毒化
+                                replaced.insert(f.name.clone());
+                                fields.push(self.poison_field(&f.name, node));
+                            }
+                            None => fields.push(f.clone()),
                         }
                     }
                     for b in &hir_bindings {
                         if !replaced.contains(&b.name) {
-                            let ty = b.value.ty().clone();
                             fields.push(FieldSchema {
                                 id: b.output,
                                 name: b.name.clone(),
-                                ty,
+                                ty: b.value.ty().clone(),
                                 origin: FieldOrigin::Derived {
-                                    node: self.nodes.len() as NodeId,
+                                    node,
                                     binding: b.name.clone(),
                                 },
                             });
                         }
                     }
-                    let node_id =
-                        self.push_node(vec![current_id], Schema { fields }, *span, |base| {
-                            HirNode::Transform {
-                                base,
-                                kind: TransformKind::Extend {
-                                    bindings: hir_bindings,
-                                },
-                            }
-                        });
-                    current_schema = self.nodes[node_id as usize].base().output.clone();
-                    current_id = node_id;
+                    // 失败的新绑定也按记录里的出现顺序追加（与成功的绑定一致）
+                    for b in &record.bindings {
+                        if failed.contains(&b.name) && !replaced.contains(&b.name) {
+                            replaced.insert(b.name.clone());
+                            fields.push(self.poison_field(&b.name, node));
+                        }
+                    }
+                    if failed.is_empty() {
+                        let node_id =
+                            self.push_node(vec![current_id], Schema { fields }, *span, |base| {
+                                HirNode::Transform {
+                                    base,
+                                    kind: TransformKind::Extend {
+                                        bindings: hir_bindings,
+                                    },
+                                }
+                            });
+                        current_schema = self.nodes[node_id as usize].base().output.clone();
+                        current_id = node_id;
+                    } else {
+                        // 带着占位继续；算子不发射
+                        current_schema = Schema { fields };
+                    }
                     i += 1;
                 }
                 ast::Op::Select { items, span } => {
                     self.history.push(current_schema.clone());
+                    let node = self.nodes.len() as NodeId;
                     let mut projections = Vec::new();
                     let mut out_fields = Vec::new();
                     let mut seen_names: BTreeMap<String, Span> = BTreeMap::new();
+                    let mut damaged = false;
                     for item in items {
-                        match &item.alias {
-                            None => {
-                                // 无 as：字段引用（parser 已保证），保留身份
-                                let resolved =
-                                    self.resolve_expr(&item.expr, &current_schema, false)?;
+                        // 输出名：有 as 用 as；否则一定是字段引用（PAR-006 已保证），用字段名
+                        let name = match &item.alias {
+                            Some(alias) => alias.clone(),
+                            None => match &item.expr {
+                                ast::Expr::Field { name, .. } => name.clone(),
+                                _ => unreachable!("PAR-006 已保证无 as 的项是字段引用"),
+                            },
+                        };
+                        if let Some(prev) = seen_names.insert(name.clone(), item.span) {
+                            self.diags.error(
+                                Code::SchDuplicateOutput,
+                                format!("select 输出名称 `{}` 重复", name),
+                                item.span.merge(prev),
+                            );
+                            damaged = true; // 重名的这一项丢弃
+                            continue;
+                        }
+                        match self.resolve_expr(&item.expr, &current_schema, false) {
+                            Some(resolved) => {
                                 self.const_domain_check(&resolved);
-                                let field = match &resolved {
-                                    THirExpr::Field { field, .. } => *field,
-                                    _ => unreachable!("PAR-006 已保证字段引用"),
-                                };
-                                let src = current_schema
-                                    .fields
-                                    .iter()
-                                    .find(|f| f.id == field)
-                                    .expect("字段已解析");
-                                let name = src.name.clone();
-                                if let Some(prev) = seen_names.insert(name.clone(), item.span) {
-                                    self.diags.error(
-                                        Code::SchDuplicateOutput,
-                                        format!("select 输出名称 `{}` 重复", name),
-                                        item.span.merge(prev),
-                                    );
-                                    return None;
+                                if item.alias.is_none() {
+                                    // 无 as：字段引用，保留身份
+                                    let field = match &resolved {
+                                        THirExpr::Field { field, .. } => *field,
+                                        _ => unreachable!("PAR-006 已保证字段引用"),
+                                    };
+                                    let src = current_schema
+                                        .fields
+                                        .iter()
+                                        .find(|f| f.id == field)
+                                        .expect("字段已解析");
+                                    projections.push(Projection {
+                                        expr: resolved,
+                                        output: field,
+                                        name: name.clone(),
+                                    });
+                                    out_fields.push(src.clone());
+                                } else {
+                                    let output = self.fresh_field();
+                                    let ty = resolved.ty().clone();
+                                    projections.push(Projection {
+                                        expr: resolved,
+                                        output,
+                                        name: name.clone(),
+                                    });
+                                    out_fields.push(FieldSchema {
+                                        id: output,
+                                        name: name.clone(),
+                                        ty,
+                                        origin: FieldOrigin::Derived {
+                                            node,
+                                            binding: name.clone(),
+                                        },
+                                    });
                                 }
-                                projections.push(Projection {
-                                    expr: resolved,
-                                    output: field,
-                                    name: name.clone(),
-                                });
-                                out_fields.push(src.clone());
                             }
-                            Some(alias) => {
-                                let resolved =
-                                    self.resolve_expr(&item.expr, &current_schema, false)?;
-                                self.const_domain_check(&resolved);
-                                if let Some(prev) = seen_names.insert(alias.clone(), item.span) {
-                                    self.diags.error(
-                                        Code::SchDuplicateOutput,
-                                        format!("select 输出名称 `{}` 重复", alias),
-                                        item.span.merge(prev),
-                                    );
-                                    return None;
-                                }
-                                let output = self.fresh_field();
-                                let ty = resolved.ty().clone();
-                                projections.push(Projection {
-                                    expr: resolved,
-                                    output,
-                                    name: alias.clone(),
-                                });
-                                out_fields.push(FieldSchema {
-                                    id: output,
-                                    name: alias.clone(),
-                                    ty,
-                                    origin: FieldOrigin::Derived {
-                                        node: self.nodes.len() as NodeId,
-                                        binding: alias.clone(),
-                                    },
-                                });
+                            None => {
+                                damaged = true;
+                                out_fields.push(self.poison_field(&name, node));
                             }
                         }
                     }
-                    let node_id = self.push_node(
-                        vec![current_id],
-                        Schema { fields: out_fields },
-                        *span,
-                        |base| HirNode::Transform {
-                            base,
-                            kind: TransformKind::Select { projections },
-                        },
-                    );
-                    current_schema = self.nodes[node_id as usize].base().output.clone();
-                    current_id = node_id;
+                    if damaged {
+                        current_schema = Schema { fields: out_fields };
+                    } else {
+                        let node_id = self.push_node(
+                            vec![current_id],
+                            Schema { fields: out_fields },
+                            *span,
+                            |base| HirNode::Transform {
+                                base,
+                                kind: TransformKind::Select { projections },
+                            },
+                        );
+                        current_schema = self.nodes[node_id as usize].base().output.clone();
+                        current_id = node_id;
+                    }
                     i += 1;
                 }
                 ast::Op::Distinct { span } => {
@@ -334,41 +416,49 @@ impl Lowerer<'_> {
                 ast::Op::Sort { keys, span } => {
                     self.history.push(current_schema.clone());
                     let mut hir_keys = Vec::new();
+                    let mut damaged = false;
                     for k in keys {
-                        let resolved = self.resolve_expr(&k.expr, &current_schema, false)?;
-                        self.const_domain_check(&resolved);
-                        let base = resolved.ty().base();
-                        match base {
-                            Type::I64 | Type::F64 | Type::Str => {}
-                            _ => {
-                                self.diags.error(
-                                    Code::SemOpUnsupported,
-                                    "sort 键类型必须可排序（i64/f64/string）",
-                                    k.span,
-                                );
-                                return None;
+                        match self.resolve_expr(&k.expr, &current_schema, false) {
+                            Some(resolved) => {
+                                self.const_domain_check(&resolved);
+                                match resolved.ty().base() {
+                                    Type::I64 | Type::F64 | Type::Str => hir_keys.push(SortKeyH {
+                                        expr: resolved,
+                                        descending: k.descending,
+                                    }),
+                                    _ => {
+                                        self.diags.error(
+                                            Code::SemOpUnsupported,
+                                            "sort 键类型必须可排序（i64/f64/string）",
+                                            k.span,
+                                        );
+                                        damaged = true;
+                                    }
+                                }
                             }
+                            None => damaged = true,
                         }
-                        hir_keys.push(SortKeyH {
-                            expr: resolved,
-                            descending: k.descending,
-                        });
                     }
-                    let node_id =
-                        self.push_node(vec![current_id], current_schema.clone(), *span, |base| {
-                            HirNode::Transform {
+                    if !damaged {
+                        let node_id = self.push_node(
+                            vec![current_id],
+                            current_schema.clone(),
+                            *span,
+                            |base| HirNode::Transform {
                                 base,
                                 kind: TransformKind::Sort { keys: hir_keys },
-                            }
-                        });
-                    current_id = node_id;
+                            },
+                        );
+                        current_id = node_id;
+                    }
                     i += 1;
                 }
                 ast::Op::Take { n, span } => {
                     if *n < 0 {
                         self.diags
                             .error(Code::SemTypeMismatch, "take 的参数必须是非负整数", *span);
-                        return None;
+                        i += 1;
+                        continue;
                     }
                     self.history.push(current_schema.clone());
                     let node_id =
@@ -383,6 +473,7 @@ impl Lowerer<'_> {
                 }
                 ast::Op::Join { right, on, span } => {
                     self.history.push(current_schema.clone());
+                    // 右表的 Schema 未知是致命的（同主源）
                     let (right_id, right_schema) = self.lower_source(right)?;
                     let combined = Schema {
                         fields: current_schema
@@ -392,18 +483,33 @@ impl Lowerer<'_> {
                             .cloned()
                             .collect(),
                     };
-                    let resolved = self.resolve_expr(on, &combined, true)?;
-                    self.check_predicate(&resolved)?;
-                    self.const_domain_check(&resolved);
-                    let node_id =
-                        self.push_node(vec![current_id, right_id], combined, *span, |base| {
-                            HirNode::Transform {
-                                base,
-                                kind: TransformKind::Join { on: resolved },
+                    let node_id = match self.resolve_expr(on, &combined, true) {
+                        Some(resolved) => {
+                            if self.check_predicate(&resolved).is_some() {
+                                self.const_domain_check(&resolved);
+                                Some(self.push_node(
+                                    vec![current_id, right_id],
+                                    combined.clone(),
+                                    *span,
+                                    |base| HirNode::Transform {
+                                        base,
+                                        kind: TransformKind::Join { on: resolved },
+                                    },
+                                ))
+                            } else {
+                                None
                             }
-                        });
-                    current_schema = self.nodes[node_id as usize].base().output.clone();
-                    current_id = node_id;
+                        }
+                        None => None,
+                    };
+                    current_schema = match node_id {
+                        Some(n) => {
+                            current_id = n;
+                            self.nodes[n as usize].base().output.clone()
+                        }
+                        // 连接条件没能解析：算子不发射，但两侧的字段都对下游可见
+                        None => combined,
+                    };
                     i += 1;
                 }
             }
@@ -476,13 +582,15 @@ impl Lowerer<'_> {
         let source_id = self.next_source;
         self.next_source += 1;
         if let Some(alias) = source.alias() {
-            if self.aliases.insert(alias.to_string(), source_id).is_some() {
+            let previous = self.aliases.insert(alias.to_string(), source_id);
+            if let Some(old) = previous {
+                // 别名重复（SEM-004）：报告，并保留先前的绑定；后面的检查照常进行
+                self.aliases.insert(alias.to_string(), old);
                 self.diags.error(
                     Code::SemAliasDuplicate,
                     format!("源别名 `{}` 重复", alias),
                     lock_span,
                 );
-                return None;
             }
         }
         let fields: Vec<FieldSchema> = lock
@@ -520,6 +628,8 @@ impl Lowerer<'_> {
 
     // ---------- 聚合 ----------
 
+    /// 聚合节点（分组 / 全局）。返回 `(节点, 输出 Schema)`：有任一键或绑定失败时节点为 `None`，
+    /// 但输出 Schema 照常给出——失败的名字是毒化占位，流水线带着它继续。
     #[allow(clippy::too_many_arguments)]
     fn lower_aggregate(
         &mut self,
@@ -528,14 +638,16 @@ impl Lowerer<'_> {
         group: Option<&Vec<ast::GroupKey>>,
         bindings: &Vec<ast::AggBinding>,
         span: Span,
-    ) -> Option<(NodeId, Schema)> {
+    ) -> (Option<NodeId>, Schema) {
         self.history.push(input_schema.clone());
         let grouped = group.is_some();
-        let node_id_placeholder = self.nodes.len() as NodeId;
+        let node = self.nodes.len() as NodeId;
+        let mut damaged = false;
 
-        // 分组键：MVP 只接受字段引用，输出名去限定
+        // 分组键：MVP 只接受字段引用，输出名去限定。逐个键检查
         let mut group_keys = Vec::new();
         let mut key_names: BTreeMap<String, Span> = BTreeMap::new();
+        let mut failed_keys: Vec<String> = Vec::new();
         if let Some(keys) = group {
             for k in keys {
                 if k.alias.is_some() {
@@ -544,7 +656,8 @@ impl Lowerer<'_> {
                         "MVP 不支持分组键 `as` 命名（表达式分组键与命名后置）",
                         k.span,
                     );
-                    return None;
+                    damaged = true;
+                    continue;
                 }
                 let field_expr = match &k.expr {
                     ast::Expr::Field { alias, name, span } => (alias, name, *span),
@@ -554,11 +667,10 @@ impl Lowerer<'_> {
                             "MVP 的 group_by 键只接受字段引用",
                             k.span,
                         );
-                        return None;
+                        damaged = true;
+                        continue;
                     }
                 };
-                let resolved =
-                    self.resolve_field(field_expr.0, field_expr.1, field_expr.2, input_schema)?;
                 let name = field_expr.1.clone();
                 if let Some(prev) = key_names.insert(name.clone(), k.span) {
                     self.diags.error(
@@ -566,23 +678,31 @@ impl Lowerer<'_> {
                         format!("分组键去限定后重名 `{}`（SCH-004）", name),
                         k.span.merge(prev),
                     );
-                    return None;
+                    damaged = true;
+                    continue;
                 }
-                let ty = resolved.ty().clone();
-                let output = self.fresh_field();
-                group_keys.push(pebble_hir::GroupKeyH {
-                    value: resolved,
-                    output,
-                    name: name.clone(),
-                });
-                // 分组键输出（组级值）放在 node schema；先记录，稍后统一构建
-                let _ = ty;
+                match self.resolve_field(field_expr.0, field_expr.1, field_expr.2, input_schema) {
+                    Some(resolved) => {
+                        let output = self.fresh_field();
+                        group_keys.push(pebble_hir::GroupKeyH {
+                            value: resolved,
+                            output,
+                            name: name.clone(),
+                        });
+                    }
+                    None => {
+                        // 已报告，或是毒化。组级的这个名字留一个占位
+                        damaged = true;
+                        failed_keys.push(name);
+                    }
+                }
             }
         }
 
-        // 聚合绑定
+        // 聚合绑定。逐个绑定检查
         let mut hir_bindings = Vec::new();
         let mut all_names: BTreeMap<String, Span> = key_names.clone();
+        let mut failed: Vec<String> = Vec::new();
         for b in bindings {
             if let Some(prev) = all_names.insert(b.name.clone(), b.span) {
                 if key_names.contains_key(&b.name) {
@@ -598,57 +718,33 @@ impl Lowerer<'_> {
                         b.span.merge(prev),
                     );
                 }
-                return None;
+                damaged = true;
+                continue;
             }
-            let (ast_func, arg, call_span) = (&b.call.func, &b.call.arg, b.call.span);
-            let func = to_hir_agg(ast_func);
-            // count 可带/不带参数；其余聚合必须恰好一个参数
-            let arity_ok = if matches!(func, AggFunc::Count) {
-                true
-            } else {
-                arg.is_some()
-            };
-            if !arity_ok {
-                self.diags.error(
-                    Code::SemTypeMismatch,
-                    format!("`{}` 的参数数量不合法", func_name(&func)),
-                    call_span,
-                );
-                return None;
+            match self.lower_agg_binding(b, input_schema, grouped) {
+                Ok(binding) => hir_bindings.push(binding),
+                Err(()) => {
+                    damaged = true;
+                    failed.push(b.name.clone());
+                }
             }
-            let resolved_arg = match arg {
-                Some(a) => Some(self.resolve_with_base(a, input_schema, None, false)?),
-                None => None,
-            };
-            if let Some(ra) = &resolved_arg {
-                self.const_domain_check(ra);
-            }
-            let ty = self.agg_result_type(&func, resolved_arg.as_ref(), grouped, call_span)?;
-            let output = self.fresh_field();
-            hir_bindings.push(AggBindingH {
-                output,
-                name: b.name.clone(),
-                call: AggCallH {
-                    func,
-                    arg: resolved_arg,
-                },
-            });
-            let _ = ty;
         }
 
-        // 输出 Schema：分组键 + 聚合绑定
+        // 输出 Schema：分组键 + 聚合绑定（失败的是毒化占位）
         let mut fields = Vec::new();
         for k in &group_keys {
-            let ty = k.value.ty().clone();
             fields.push(FieldSchema {
                 id: k.output,
                 name: k.name.clone(),
-                ty,
+                ty: k.value.ty().clone(),
                 origin: FieldOrigin::Derived {
-                    node: node_id_placeholder,
+                    node,
                     binding: k.name.clone(),
                 },
             });
+        }
+        for name in &failed_keys {
+            fields.push(self.poison_field(name, node));
         }
         for b in &hir_bindings {
             let ty = self
@@ -659,22 +755,71 @@ impl Lowerer<'_> {
                 name: b.name.clone(),
                 ty,
                 origin: FieldOrigin::Derived {
-                    node: node_id_placeholder,
+                    node,
                     binding: b.name.clone(),
                 },
             });
         }
+        for name in &failed {
+            fields.push(self.poison_field(name, node));
+        }
+        let schema = Schema { fields };
 
-        let node_id = self.push_node(vec![input_id], Schema { fields }, span, |base| {
+        if damaged {
+            return (None, schema);
+        }
+        let node_id = self.push_node(vec![input_id], schema.clone(), span, |base| {
             HirNode::Aggregate {
                 base,
                 group_keys,
                 bindings: hir_bindings,
             }
         });
-        debug_assert_eq!(node_id, node_id_placeholder);
-        let schema = self.nodes[node_id as usize].base().output.clone();
-        Some((node_id, schema))
+        debug_assert_eq!(node_id, node);
+        (Some(node_id), schema)
+    }
+
+    /// 一个聚合绑定：参数数量、参数解析、返回类型。失败时错误已报告（或是毒化）。
+    fn lower_agg_binding(
+        &mut self,
+        b: &ast::AggBinding,
+        input_schema: &Schema,
+        grouped: bool,
+    ) -> Result<AggBindingH, ()> {
+        let (arg, call_span) = (&b.call.arg, b.call.span);
+        let func = to_hir_agg(&b.call.func);
+        // count 可带/不带参数；其余聚合必须恰好一个参数
+        let arity_ok = matches!(func, AggFunc::Count) || arg.is_some();
+        if !arity_ok {
+            self.diags.error(
+                Code::SemTypeMismatch,
+                format!("`{}` 的参数数量不合法", func_name(&func)),
+                call_span,
+            );
+            return Err(());
+        }
+        let resolved_arg = match arg {
+            Some(a) => Some(
+                self.resolve_with_base(a, input_schema, None, false)
+                    .ok_or(())?,
+            ),
+            None => None,
+        };
+        if let Some(ra) = &resolved_arg {
+            self.const_domain_check(ra);
+        }
+        // 返回类型不合法时错误已由 agg_result_type 报告
+        self.agg_result_type(&func, resolved_arg.as_ref(), grouped, call_span)
+            .ok_or(())?;
+        let output = self.fresh_field();
+        Ok(AggBindingH {
+            output,
+            name: b.name.clone(),
+            call: AggCallH {
+                func,
+                arg: resolved_arg,
+            },
+        })
     }
 
     /// 聚合返回类型（05 §5.3 签名表）。
@@ -1000,8 +1145,13 @@ impl Lowerer<'_> {
 
         // And/Or：Kleene，null 侧基类型 Bool
         if matches!(op, And | Or) {
-            let l = self.resolve_with_base(left, env, Some(Bool), in_join_on)?;
-            let r = self.resolve_with_base(right, env, Some(Bool), in_join_on)?;
+            // 两侧的类型互不依赖：各自解析，两侧的错误都能报出来。
+            //（连着写两个 `?` 的话，第一个错误就会让第二个还没检查的表达式被跳过）
+            let l = self.resolve_with_base(left, env, Some(Bool), in_join_on);
+            let r = self.resolve_with_base(right, env, Some(Bool), in_join_on);
+            let (Some(l), Some(r)) = (l, r) else {
+                return None;
+            };
             for side in [&l, &r] {
                 if !matches!(side.ty().base(), Bool) {
                     self.diags.error(
@@ -1278,9 +1428,11 @@ impl Lowerer<'_> {
                     );
                     return None;
                 };
+                // 毒化的字段对解析不可见：它是某个失败定义的占位
                 let matches: Vec<&FieldSchema> = env
                     .fields
                     .iter()
+                    .filter(|f| !self.poisoned.contains(&f.id))
                     .filter(|f| match &f.origin {
                         FieldOrigin::Source {
                             source,
@@ -1289,6 +1441,16 @@ impl Lowerer<'_> {
                         FieldOrigin::Derived { .. } => false,
                     })
                     .collect();
+                // 被失败的 extend 覆盖掉的源字段（如 `.extend({ amount = … })` 失败后的 `o.amount`）：
+                // 占位是 Derived 来源，上面按「来源 + 字段名」找不到它。它同样是被毒化的名字
+                if matches.is_empty()
+                    && env
+                        .fields
+                        .iter()
+                        .any(|f| f.name == *name && self.poisoned.contains(&f.id))
+                {
+                    return None;
+                }
                 match matches.len() {
                     0 => None,
                     1 => Some(matches[0].clone()),
@@ -1304,7 +1466,17 @@ impl Lowerer<'_> {
                 }
             }
             None => {
-                let matches = env.by_name(name);
+                // 毒化的字段对解析不可见：它是某个失败定义的占位。
+                // 若这个名字的候选**全部**是毒化的，就沉默地停下——
+                // 不能落到下面「从未存在 / 超出作用域」的分支去：占位本身就在历史里，会被误判成 SEM-012
+                let raw = env.by_name(name);
+                if !raw.is_empty() && raw.iter().all(|f| self.poisoned.contains(&f.id)) {
+                    return None;
+                }
+                let matches: Vec<&FieldSchema> = raw
+                    .into_iter()
+                    .filter(|f| !self.poisoned.contains(&f.id))
+                    .collect();
                 match matches.len() {
                     0 => None,
                     1 => Some(matches[0].clone()),
@@ -1427,9 +1599,12 @@ impl Lowerer<'_> {
             .map(|(k, _)| k.clone())
     }
 
+    /// 诊断提示里的「当前可见字段」。毒化的占位不算可见——它的定义失败了，
+    /// 把它当成可用字段推荐给用户是误导。
     fn visible_fields(&self, env: &Schema) -> String {
         env.fields
             .iter()
+            .filter(|f| !self.poisoned.contains(&f.id))
             .map(|f| f.name.clone())
             .collect::<BTreeSet<_>>()
             .into_iter()
@@ -1441,6 +1616,26 @@ impl Lowerer<'_> {
         let id = self.next_field;
         self.next_field += 1;
         id
+    }
+
+    /// 一个定义失败的名字：在输出 Schema 里占住它的位置，并记入毒化表。
+    ///
+    /// 为什么要占位，而不是干脆不放？因为下游很可能引用它（`.extend({ x = … }).filter(x > 0)`）。
+    /// 占位让这个名字「存在但坏了」：引用它的表达式在 `resolve_field` 里沉默地停下，
+    /// 而不是报一条「字段 x 不存在」——那只是前一个错误的后果。
+    /// 类型只是填空，永远不会被读取：碰到毒化的表达式在类型检查之前就停了。
+    fn poison_field(&mut self, name: &str, node: NodeId) -> FieldSchema {
+        let id = self.fresh_field();
+        self.poisoned.insert(id);
+        FieldSchema {
+            id,
+            name: name.to_string(),
+            ty: Type::Opt(Box::new(Type::I64)),
+            origin: FieldOrigin::Derived {
+                node,
+                binding: name.to_string(),
+            },
+        }
     }
 
     fn push_node(
@@ -2117,5 +2312,173 @@ MemoryTable("orders") as o
             text.contains(&format!("{} SEM-001", "^".repeat(9))),
             "{text}"
         );
+    }
+
+    // ---------- 第 9 章：语义阶段的多错误报告与毒化 ----------
+    //
+    // 与解析器那边同理：每个用例断言的是**完整的**错误列表——一个根因只报一次，独立的错误一个不漏。
+
+    /// 全部诊断的错误码，按源码位置排序。
+    fn codes(src: &str) -> Vec<String> {
+        let mut diags = DiagBag::new();
+        let catalog = test_catalog();
+        let program = pebble_parser::parse(src, &mut diags).expect("测试源码应当语法正确");
+        assert!(
+            compile(&program, &catalog, &mut diags).is_none(),
+            "有错误时不得产出 HIR"
+        );
+        diags.normalize();
+        diags
+            .diags
+            .iter()
+            .map(|d| d.code.as_str().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn independent_errors_in_different_ops_are_all_reported() {
+        // 以前：只报第一个，第二个要等改完第一个、重新编译才看得见
+        let src = "MemoryTable(\"orders\") as o\n  .filter(o.typo_a > 1)\n  .filter(o.typo_b > 2)\n  .collect()\n";
+        assert_eq!(codes(src), ["SEM-001", "SEM-001"]);
+        // 不同种类的错误混在一起也一样
+        let src = "MemoryTable(\"orders\") as o\n  .filter(o.amount)\n  .filter(o.typo > 2)\n  .collect()\n";
+        assert_eq!(codes(src), ["SEM-010", "SEM-001"]);
+        // 同一个谓词的两侧：`&&` 两边各自解析
+        let src =
+            "MemoryTable(\"orders\") as o\n  .filter(o.typo_a > 1 && o.typo_b < 2)\n  .collect()\n";
+        assert_eq!(codes(src), ["SEM-001", "SEM-001"]);
+    }
+
+    #[test]
+    fn bindings_in_one_extend_are_checked_independently() {
+        let src = concat!(
+            "MemoryTable(\"orders\") as o\n",
+            "  .extend({\n",
+            "    a = o.typo_a,\n",
+            "    b = o.typo_b,\n",
+            "    c = o.amount + 1,\n",
+            "  })\n",
+            "  .collect()\n",
+        );
+        assert_eq!(codes(src), ["SEM-001", "SEM-001"]);
+    }
+
+    #[test]
+    fn a_failed_name_is_poisoned_not_reported_twice() {
+        // x 的定义失败；后面两处对 x 的使用都是它的后果，不该再报
+        let src = concat!(
+            "MemoryTable(\"orders\") as o\n",
+            "  .extend({ x = o.typo })\n",
+            "  .filter(x > 0)\n",
+            "  .extend({ y = x + 1 })\n",
+            "  .collect()\n",
+        );
+        assert_eq!(codes(src), ["SEM-001"]);
+    }
+
+    #[test]
+    fn poison_does_not_hide_unrelated_errors_downstream() {
+        // x 毒化了，但 o.nope 是另一个独立的错误（在别的元素里）
+        let src = concat!(
+            "MemoryTable(\"orders\") as o\n",
+            "  .extend({ x = o.typo })\n",
+            "  .filter(x > 0)\n",
+            "  .extend({ y = 2, z = o.nope })\n",
+            "  .collect()\n",
+        );
+        assert_eq!(codes(src), ["SEM-001", "SEM-001"]);
+    }
+
+    #[test]
+    fn override_of_a_real_field_is_poisoned_when_it_fails() {
+        // 覆盖失败：名字 amount 现在指向失败的新定义。
+        // 别名限定的 `o.amount` 与裸 `amount` 都必须沉默——它们是对同一个失败定义的引用
+        let src = concat!(
+            "MemoryTable(\"orders\") as o\n",
+            "  .extend({ amount = o.typo })\n",
+            "  .filter(o.amount > 0)\n",
+            "  .select(amount)\n",
+            "  .collect()\n",
+        );
+        assert_eq!(codes(src), ["SEM-001"]);
+    }
+
+    #[test]
+    fn select_items_are_checked_independently() {
+        let src = concat!(
+            "MemoryTable(\"orders\") as o\n",
+            "  .select(o.typo_a, status, o.typo_b as t)\n",
+            "  .collect()\n",
+        );
+        assert_eq!(codes(src), ["SEM-001", "SEM-001"]);
+    }
+
+    #[test]
+    fn a_broken_select_still_cuts_the_scope() {
+        // select 有一项坏了，但它裁剪作用域的语义不变：后面用到被裁掉的字段仍是 SEM-012
+        let src = concat!(
+            "MemoryTable(\"orders\") as o\n",
+            "  .select(o.typo_a, status)\n",
+            "  .filter(o.amount > 0)\n",
+            "  .collect()\n",
+        );
+        assert_eq!(codes(src), ["SEM-001", "SEM-012"]);
+    }
+
+    #[test]
+    fn agg_keys_and_bindings_are_checked_independently() {
+        let src = concat!(
+            "MemoryTable(\"orders\") as o\n",
+            "  .group_by(o.typo_key)\n",
+            "  .agg(\n",
+            "    a = sum(o.typo_a),\n",
+            "    b = max(status),\n",
+            "    c = avg(status),\n",
+            "    d = count(),\n",
+            "  )\n",
+            "  .collect()\n",
+        );
+        assert_eq!(codes(src), ["SEM-001", "SEM-001", "SEM-003"]);
+        // 聚合之后再引用输入行字段：与上面的错误无关，照常报出
+        let src = src.replace("  .collect()", "  .filter(o.amount > 0)\n  .collect()");
+        assert_eq!(codes(&src), ["SEM-001", "SEM-001", "SEM-003", "SEM-012"]);
+    }
+
+    #[test]
+    fn group_by_without_agg_does_not_hide_later_errors() {
+        let src = concat!(
+            "MemoryTable(\"orders\") as o\n",
+            "  .group_by(o.customer_id)\n",
+            "  .sort(o.typo_a, o.typo_b)\n",
+            "  .collect()\n",
+        );
+        assert_eq!(codes(src), ["SEM-005", "SEM-001", "SEM-001"]);
+    }
+
+    #[test]
+    fn duplicate_names_are_reported_and_the_rest_is_still_checked() {
+        let src = concat!(
+            "MemoryTable(\"orders\") as o\n",
+            "  .extend({\n",
+            "    x = 1,\n",
+            "    x = o.typo,\n",
+            "    y = o.typo2,\n",
+            "  })\n",
+            "  .collect()\n",
+        );
+        assert_eq!(codes(src), ["SEM-014", "SEM-001"]);
+    }
+
+    #[test]
+    fn missing_source_lock_is_fatal_for_the_semantic_phase() {
+        // 表的形状未知：后面的检查无从谈起，只报这一条
+        let src = "MemoryTable(\"nope\") as o\n  .filter(o.typo > 1)\n  .collect()\n";
+        assert_eq!(codes(src), ["SCH-001"]);
+    }
+
+    #[test]
+    fn valid_programs_are_unaffected_by_the_recovery_machinery() {
+        let hir = compile_ok(M0);
+        assert!(hir.validate().is_ok());
     }
 }

@@ -136,6 +136,61 @@ fn semantic_error_is_located_after_chinese_comments() {
     );
 }
 
+/// `needle` 在 `src` 中第一次出现处的 `文件:行:列`（期望值不靠手数）。
+fn at(src: &str, needle: &str) -> String {
+    let start = src
+        .find(needle)
+        .unwrap_or_else(|| panic!("测试源码里找不到 {needle:?}"));
+    let before = &src[..start];
+    let line = before.matches('\n').count() + 1;
+    let col = before.rsplit('\n').next().unwrap_or("").chars().count() + 1;
+    format!("semantic.pebble:{line}:{col}")
+}
+
+/// 语义阶段的多错误报告（第 9 章）：独立的错误一次报完；
+/// 引用了一个失败名字的下游算子不重复报错（毒化）。
+#[test]
+fn semantic_errors_are_all_reported_without_cascades() {
+    // 第 3 行拼错 `amount`，第 4 行用到了它产生的 `total`（后果，不该再报），第 5 行又拼错一个字段
+    let src = concat!(
+        "Table(\"tests/data/orders.csv\") as o\n",
+        "  .extend({ total = o.amont + 1 })\n",
+        "  .filter(total > 0)\n",
+        "  .filter(o.statuz == \"paid\")\n",
+        "  .collect()\n",
+    );
+    let path = scratch_source("semantic", src);
+    let f = build_failure(&path, "diag-semantic");
+    assert_eq!(f.code, 2);
+    assert_eq!(
+        positions(&f.report),
+        [
+            format!("  ┌─ {}", at(src, "o.amont")),
+            format!("  ┌─ {}", at(src, "o.statuz")),
+        ],
+        "{}",
+        f.report
+    );
+    assert_eq!(f.report.matches("error[").count(), 2, "{}", f.report);
+    assert!(
+        !f.report.contains("`total`"),
+        "total 是失败定义的后果，不应被报: {}",
+        f.report
+    );
+    // 提示里的「当前可见字段」也不该把它当成可用字段推荐出来
+    for hint in f.report.lines().filter(|l| l.contains("提示:")) {
+        assert!(
+            !hint.contains("total"),
+            "提示不应推荐一个定义失败的名字: {hint}"
+        );
+    }
+    assert!(
+        f.report.ends_with("编译中止：共 2 个错误（SEM 2）\n"),
+        "{}",
+        f.report
+    );
+}
+
 /// 几千个错误也要很快出结果。
 ///
 /// 独立评审测得：以前一行里上万个非法字符、或者两万行各有笔误的文件，编译一分钟以上

@@ -10,6 +10,9 @@
 >
 > **第 8 章（解析器错误恢复）已完成**：一次编译报出全部词法/语法错误（按源码位置排序，末尾附汇总行），
 > 并修复了中文注释导致的诊断定位漂移/崩溃。试试 [tests/fixtures/diagnostics/multi_error.pebble](tests/fixtures/diagnostics/multi_error.pebble)，教程见 [`docs/tutorial/ch08-解析器错误恢复.md`](docs/tutorial/ch08-解析器错误恢复.md)。
+>
+> **第 9 章（语义层错误恢复）已完成**：语义错误同样一次报完；定义失败的名字被毒化，它的后果不再被报成新错误。
+> 试试 [tests/fixtures/diagnostics/multi_semantic_error.pebble](tests/fixtures/diagnostics/multi_semantic_error.pebble)，教程见 [`docs/tutorial/ch09-语义层错误恢复.md`](docs/tutorial/ch09-语义层错误恢复.md)。
 
 ## 文档导航
 
@@ -58,4 +61,4 @@ Rust 2024 · 手写递归下降解析（原型实现选择；Chumsky 为路线�
 
 M0 明确不做：Polars/多后端、另写解释器、自建 Physical Plan、Arrow 全栈、自研 storage；having/cast/时间函数/coalesce/split 按计划后置。
 
-已知限制（如实记录）：DuckDB 后端为每个算子生成一层嵌套子查询，连续约 300 个算子以上引擎无法执行（实测，见第 6 章）；语义阶段一次只报出一个错误（第 9 章解决）。
+已知限制（如实记录）：DuckDB 后端为每个算子生成一层嵌套子查询，连续约 300 个算子以上引擎无法执行（实测，见第 6 章）。

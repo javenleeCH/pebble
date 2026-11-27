@@ -1,0 +1,10 @@
+// 第 9 章演示：语义错误一次报完，坏名字不再重复报
+// （这个文件是故意写错的：两个字段名拼错了，请勿「修复」）
+Table("tests/data/orders.csv") as o
+  .extend({ total = o.amont + 1 })
+  //               ↑ amount 拼成了 amont
+  .filter(total > 0)
+  //        ↑ total 的定义失败了，所以这一行不会再报错
+  .filter(o.statuz == "paid")
+  //            ↑ status 拼成了 statuz
+  .collect()

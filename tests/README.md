@@ -1,6 +1,6 @@
 # 测试与验收
 
-> 测试体系：`cargo test` 全绿（102 项）；证据链集成测试在真实 DuckDB 1.4.x 上执行。
+> 测试体系：`cargo test` 全绿（115 项）；证据链集成测试在真实 DuckDB 1.4.x 上执行。
 
 ## 单元测试（随 crate）
 
@@ -9,7 +9,7 @@
 | `pebble-diagnostic` | Span 定位/渲染（含中文注释后行列精确、离谱 Span 不 panic、跨行只标注首行）、错误码稳定性（LEX/PAR/SEM/SCH/RUN）、诊断排序去重、`render_all` 汇总行、行号二分查找（CRLF 与多字节字符）、大量诊断时的显示上限 |
 | `pebble-parser` | 全部样例可解析；LEX-001（`|`/`^`）、PAR-003~007、PAR-002（终端后接算子）、SEM-016（字面量越界）；**错误恢复矩阵**（`tests/recovery.rs`，37 项）：多错误一次报告、三道同步点、词法洞不重复报错、残骸模式（恢复不制造诊断）、流水线层多余 token 与 PAR-002 之后继续解析、提示只说站得住的话、嵌套/长度上限不崩溃、词法边角（BOM、全角标点、隐形字符）、病态输入不死循环 |
 | `pebble-hir` | lock 哈希稳定性与篡改检测、manifest/receipt 绑定、工件哈希确定性 |
-| `pebble-semantics` | M0 lowering + 哈希确定性、注释不影响 hash（含中文注释）、语义变更改变 hash、流敏收缩、聚合签名、SEM/SCH 错误矩阵（001/003/004/005/007/008/010/011/012/014/016、SCH-001/002/004） |
+| `pebble-semantics` | M0 lowering + 哈希确定性、注释不影响 hash（含中文注释）、语义变更改变 hash、流敏收缩、聚合签名、SEM/SCH 错误矩阵（001/003/004/005/007/008/010/011/012/014/016、SCH-001/002/004）；**多错误报告与毒化**（12 项）：每个用例断言完整的错误列表——独立元素逐个检查、毒化的名字不再报（裸名 / 别名限定 / 覆盖）、坏 select 仍裁剪作用域、缺 lock 时停止 |
 | `pebble-duckdb` | canonical SQL 前言（threads=1）、判空 IS NOT NULL、sum checked 守卫（HUGEINT 范围）、nulls last、f64 规范化、round ties-to-even；`extend` / `join` 直接接在源后面时的 SELECT 列表（回归：曾分别报「无来源」与生成 `SELECT , …`） |
 | `pebble-latex` | LaTeX 转义；长流水线的代数视图不需要调用栈（在 256 KiB 栈的线程里给 2000 个算子出视图） |
 
@@ -22,6 +22,7 @@
 3. **semantic_error_is_located_after_chinese_comments**：中文注释之后的语义错误定位准确（此前会漂移甚至 panic）。
 4. **environment_failure_is_a_single_pebble_message**：环境问题退出码 1、单行 `[pebble]` 消息。
 5. **thousands_of_errors_render_promptly**：5 000 个错误的文件远低于分钟级完成；最多显示 100 条，汇总行给出真实总数。
+6. **semantic_errors_are_all_reported_without_cascades**：两处拼写错误一次报完；引用了失败名字的算子不重复报错，提示里也不推荐它。
 
 ## 教程契约门禁（pebble-driver/tests/docs_gate.rs）
 
@@ -29,8 +30,8 @@
 
 1. 章节清单与课程地图一致，每章含五段；
 2. 教程引用的实现资产、样例与 lock 真实存在；
-3. ch08「跑起来」贴的输出与实现对同一文件的报告**逐字**一致；
-4. ch08 的每个 rust 代码块都逐字出现在源码里（可用「（节选）」行断开，断开后每段仍须逐字一致）。
+3. ch08、ch09「跑起来」贴的输出与实现对同一文件的报告**逐字**一致；
+4. ch08、ch09 的每个 rust 代码块都逐字出现在源码里（可用「（节选）」行断开，断开后每段仍须逐字一致）。
 
 ## 集成测试（pebble-driver/tests/evidence_chain.rs）
 

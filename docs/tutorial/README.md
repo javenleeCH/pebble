@@ -27,13 +27,13 @@
 | [第 6 章](ch06-DuckDB语义守卫.md) | 后端 codegen：不继承 SQL 默认行为 | `pebble-duckdb/src/lib.rs` | `3bccd59` |
 | [第 7 章](ch07-证据链.md) | 落地：build/run/verify 证据链闭环 | `pebble-driver/src/*` | `3bccd59` |
 | [第 8 章](ch08-解析器错误恢复.md) | 解析器错误恢复：同步点、级联错误、阶段门控 | `pebble-parser/src/{lexer,parser}.rs`、`pebble-diagnostic/src/lib.rs` | 见 git log |
+| [第 9 章](ch09-语义层错误恢复.md) | 语义层错误恢复：毒化，让坏消息静默传播 | `pebble-semantics/src/lib.rs` | 见 git log |
 | [附录 A](appendix-ci-发布门禁.md) | CI 与发布门禁：把纪律变成机器 | `.github/workflows/*`、`docs_gate.rs` | 见 git log |
 
 > M0 的实现以单个大提交 `3bccd59` 收口（教训：教程驱动应当「每章一 commit」）。从第 8 章起严格执行：一章一个 commit，读者 checkout 到该章的提交就能复现本章内容。
 
 ## 后续章节规划（实现一章、写一章）
 
-- 第 9 章：语义层错误恢复——毒化类型，让坏消息静默传播（补齐 08-diagnostics §8.6 第 3 条）
 - 第 10 章：`having` 与受限 `cast`（v0.1.1）
 - 第 11 章：M2 证据签名与独立 verifier
 - 第 12 章：M3 Polars 第二后端与语义差集测试

@@ -30,6 +30,7 @@ const CHAPTERS: &[&str] = &[
     "ch06-DuckDB语义守卫.md",
     "ch07-证据链.md",
     "ch08-解析器错误恢复.md",
+    "ch09-语义层错误恢复.md",
     "appendix-ci-发布门禁.md",
 ];
 
@@ -131,6 +132,7 @@ fn tutorial_referenced_assets_exist() {
         "tests/locks/orders_csv.lock.json",
         "tests/data/orders.csv",
         "tests/fixtures/diagnostics/multi_error.pebble",
+        "tests/fixtures/diagnostics/multi_semantic_error.pebble",
         "crates/pebble-parser/tests/recovery.rs",
         "crates/pebble-driver/tests/diagnostics.rs",
         ".github/workflows/ci.yml",
@@ -183,32 +185,35 @@ fn output_block_extractor_is_line_ending_agnostic() {
     assert_eq!(output_block_after(&crlf, marker), "line 1\nline 2\n");
 }
 
+/// 需要「输出 / 代码引用逐字一致」检查的章节：`docs/tutorial/` 下的文件名 → 它「跑起来」用的演示文件。
+/// 新增一章带演示输出的教程时，在这里登记一行。
+const VERBATIM_CHAPTERS: &[(&str, &str)] = &[
+    ("ch08-解析器错误恢复.md", "multi_error.pebble"),
+    ("ch09-语义层错误恢复.md", "multi_semantic_error.pebble"),
+];
+
 /// 教程贴的输出必须与实现逐字一致。
 ///
-/// ch08「跑起来」展示的是 `pebble build` 对演示文件的完整报告。那段输出一旦与实现不一致，
-/// 读者照着教程跑就会看到别的东西——所以让它成为被测对象：消息、提示、汇总行任何一处改动，
-/// 都必须回来同步教程（或者反过来，教程改错了这里会红灯）。
-#[test]
-fn tutorial_ch08_output_matches_implementation() {
+/// 章节里「最后一条命令的完整输出」展示的是 `pebble build` 对演示文件的完整报告。
+/// 那段输出一旦与实现不一致，读者照着教程跑就会看到别的东西——所以让它成为被测对象：
+/// 消息、提示、汇总行任何一处改动，都必须回来同步教程（或者反过来，教程改错了这里会红灯）。
+fn assert_tutorial_output_matches(chapter: &str, fixture: &str) {
     let repo = repo();
-    let chapter = read(
-        repo.join("docs")
-            .join("tutorial")
-            .join("ch08-解析器错误恢复.md"),
-    );
-    let shown = output_block_after(&chapter, "最后一条命令的完整输出：");
+    let text = read(repo.join("docs").join("tutorial").join(chapter));
+    let shown = output_block_after(&text, "最后一条命令的完整输出：");
 
     let out = std::env::temp_dir()
         .join("pebble-it")
-        .join("docs-gate-ch08");
+        .join("docs-gate")
+        .join(fixture);
     let _ = std::fs::remove_dir_all(&out);
     let failure = match cmd_build(
-        &repo.join("tests/fixtures/diagnostics/multi_error.pebble"),
+        &repo.join("tests/fixtures/diagnostics").join(fixture),
         &repo.join("tests").join("locks"),
         &out,
         None,
     ) {
-        Ok(_) => panic!("演示文件是故意写错的，不应编译成功"),
+        Ok(_) => panic!("{fixture} 是故意写错的，不应编译成功"),
         Err(f) => f,
     };
     assert!(
@@ -219,7 +224,7 @@ fn tutorial_ch08_output_matches_implementation() {
     assert_eq!(
         failure.report.trim_end(),
         shown.trim_end(),
-        "ch08 教程里的输出已与实现不一致：请同步两者"
+        "{chapter} 教程里的输出已与实现不一致：请同步两者"
     );
 }
 
@@ -242,23 +247,18 @@ fn rust_sources(dir: &PathBuf, out: &mut Vec<String>) {
 
 /// 教程引用的代码必须与实现一致（教程纪律第 5 条：「过期即视为 bug」）。
 ///
-/// ch08 的每一个 ```rust 代码块都必须逐字出现在某个源文件里。
+/// 章节里的每一个 ```rust 代码块都必须逐字出现在某个源文件里。
 /// 代码块里可以用含「（节选）」的行断开；断开之后的每一段仍然必须逐字出现——
 /// 所以「节选」只能用来省略，不能用来改写。
-#[test]
-fn tutorial_ch08_code_quotes_are_verbatim() {
+fn assert_rust_quotes_are_verbatim(chapter: &str, min_blocks: usize) {
     let repo = repo();
-    let chapter = read(
-        repo.join("docs")
-            .join("tutorial")
-            .join("ch08-解析器错误恢复.md"),
-    );
+    let chapter_text = read(repo.join("docs").join("tutorial").join(chapter));
     let mut sources = Vec::new();
     rust_sources(&repo.join("crates"), &mut sources);
     assert!(!sources.is_empty(), "没有读到任何 .rs 源文件");
 
     let mut blocks: Vec<&str> = Vec::new();
-    let mut rest = chapter.as_str();
+    let mut rest = chapter_text.as_str();
     while let Some((_, after)) = rest.split_once("```rust\n") {
         let Some((body, after)) = after.split_once("\n```") else {
             break;
@@ -267,8 +267,8 @@ fn tutorial_ch08_code_quotes_are_verbatim() {
         rest = after;
     }
     assert!(
-        blocks.len() >= 10,
-        "应能从 ch08 抽出至少 10 个 rust 代码块，实际 {}",
+        blocks.len() >= min_blocks,
+        "应能从 {chapter} 抽出至少 {min_blocks} 个 rust 代码块，实际 {}",
         blocks.len()
     );
 
@@ -286,7 +286,7 @@ fn tutorial_ch08_code_quotes_are_verbatim() {
         }
         assert!(
             pieces.len() <= 3,
-            "第 {} 个代码块的节选标记过多（{} 处）——教程应当直接引用实现",
+            "{chapter} 第 {} 个代码块的节选标记过多（{} 处）——教程应当直接引用实现",
             i + 1,
             pieces.len()
         );
@@ -296,11 +296,25 @@ fn tutorial_ch08_code_quotes_are_verbatim() {
             }
             assert!(
                 sources.iter().any(|s| s.contains(piece.as_str())),
-                "ch08 第 {} 个 rust 代码块里有一段在源码中找不到——实现变了，教程没跟上？\n   {}",
+                "{chapter} 第 {} 个 rust 代码块里有一段在源码中找不到——实现变了，教程没跟上？\n   {}",
                 i + 1,
                 piece.lines().next().unwrap_or("").trim()
             );
         }
+    }
+}
+
+#[test]
+fn tutorial_output_matches_implementation() {
+    for (chapter, fixture) in VERBATIM_CHAPTERS {
+        assert_tutorial_output_matches(chapter, fixture);
+    }
+}
+
+#[test]
+fn tutorial_rust_code_quotes_are_verbatim() {
+    for (chapter, _) in VERBATIM_CHAPTERS {
+        assert_rust_quotes_are_verbatim(chapter, 5);
     }
 }
 
