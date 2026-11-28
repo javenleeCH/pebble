@@ -39,17 +39,26 @@
 ## 快速上手
 
 ```text
-# 1. Schema lock（schema-as-code）
+# 0. 审批密钥（一次性；seed 即私钥，保密）
+cargo run -p pebble-driver -- keygen --out approver.json
+
+# 1. Schema lock（schema-as-code；样例的 lock 已在 tests/locks 备好）
 cargo run -p pebble-driver -- lock table tests/data/orders.csv order_id:i64 status:string amount:i64? score:f64 customer_id:string --out tests/locks/orders_csv.lock.json
 
 # 2. build：canonical HIR/hash + DuckDB SQL + manifest
 cargo run -p pebble-driver -- build examples/00_m0_revenue.pebble --locks tests/locks
 
-# 3. run：TOCTOU 数据哈希核对 + f64 有限值预检 + 提交工件 → receipt
+# 3. sign（M2）：审批签名——顺序固定 build → sign → run，回执绑定的才是已审版本
+cargo run -p pebble-driver -- sign examples/target/pebble/00_m0_revenue/manifest.json --key approver.json
+
+# 4. run：TOCTOU 数据哈希核对 + f64 有限值预检 + 提交已审工件 → receipt
 cargo run -p pebble-driver -- run examples/target/pebble/00_m0_revenue
 
-# 4. verify：APPROVED PLAN == EXECUTED PLAN
-cargo run -p pebble-driver -- verify examples/target/pebble/00_m0_revenue/manifest.json examples/target/pebble/00_m0_revenue/receipt.json
+# 5. verify：APPROVED PLAN == EXECUTED PLAN（--pubkey 同时核验签名）
+cargo run -p pebble-driver -- verify examples/target/pebble/00_m0_revenue/manifest.json examples/target/pebble/00_m0_revenue/receipt.json --pubkey approver.json
+
+# 6. 独立核验（审计员视角：不加载编译器，只凭工件 + 外部公钥）
+cargo run -p pebble-verifier -- examples/target/pebble/00_m0_revenue --pubkey approver.json
 ```
 
 ## 五条红线

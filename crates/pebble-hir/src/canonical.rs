@@ -130,6 +130,534 @@ pub fn hir_hash(hir: &Hir) -> Hash {
     Hash::of_bytes("pebble-canonical-hir-v1", &canonical_bytes(hir))
 }
 
+// ===========================================================================
+// 反序列化（ch12：M2 独立 verifier 的前置件）
+//
+// 与写入器同文件维护：**格式的规范只有一个归属**——写、读、改格式必须三处同步。
+// 用途不是「从文件恢复编译器状态」，而是 verifier 的最小信任路径：
+// 解析 canonical 字节 → 重建结构 → 重算哈希，**绕开 parser/semantics/codegen**。
+// Span 不进编码，反序列化一律以 Span::new(0,0) 占位——哈希不覆盖 Span，
+// 所以占位不影响 roundtrip 哈希。
+// ===========================================================================
+
+use crate::{
+    AggBindingH, AggCallH, FieldOrigin, FieldSchema, NodeBase, Schema, SortKeyH, THirExpr,
+};
+use pebble_diagnostic::Span;
+
+/// 解析 canonical 字节为 Hir（占位 Span）。格式不符即 Err（带字节偏移）。
+pub fn canonical_hir(bytes: &[u8]) -> Result<Hir, String> {
+    let mut r = ByteReader { bytes, pos: 0 };
+    let hir = read_hir(&mut r)?;
+    if r.pos != bytes.len() {
+        return Err(format!(
+            "canonical 字节有尾随垃圾：期望在 {} 结束，总长 {}",
+            r.pos,
+            bytes.len()
+        ));
+    }
+    Ok(hir)
+}
+
+/// 独立 verifier 的核心检查：解析 canonical 字节并重算哈希。
+/// `bytes` 与 manifest.hir_hash 出自同一来源才有意义——verifier 拿磁盘上的
+/// canonical.hir 与 manifest 里的哈希对（见 pebble-verifier）。
+pub fn roundtrip_hash(bytes: &[u8]) -> Result<Hash, String> {
+    Ok(hir_hash(&canonical_hir(bytes)?))
+}
+
+struct ByteReader<'b> {
+    bytes: &'b [u8],
+    pos: usize,
+}
+
+impl ByteReader<'_> {
+    fn take(&mut self) -> Result<u8, String> {
+        let b = *self
+            .bytes
+            .get(self.pos)
+            .ok_or_else(|| format!("canonical 字节意外结束（偏移 {}）", self.pos))?;
+        self.pos += 1;
+        Ok(b)
+    }
+
+    fn expect(&mut self, want: u8, what: &str) -> Result<(), String> {
+        let got = self.take()?;
+        if got != want {
+            return Err(format!(
+                "{}：期望标签 `{:?}`，实际 `{:?}`（偏移 {}）",
+                what,
+                want as char,
+                got as char,
+                self.pos - 1
+            ));
+        }
+        Ok(())
+    }
+
+    fn u32(&mut self) -> Result<u32, String> {
+        let mut b = [0u8; 4];
+        for slot in &mut b {
+            *slot = self.take()?;
+        }
+        Ok(u32::from_le_bytes(b))
+    }
+
+    fn i64(&mut self) -> Result<i64, String> {
+        let mut b = [0u8; 8];
+        for slot in &mut b {
+            *slot = self.take()?;
+        }
+        Ok(i64::from_le_bytes(b))
+    }
+
+    fn f64(&mut self) -> Result<f64, String> {
+        let mut b = [0u8; 8];
+        for slot in &mut b {
+            *slot = self.take()?;
+        }
+        Ok(f64::from_bits(u64::from_le_bytes(b)))
+    }
+
+    fn str(&mut self) -> Result<String, String> {
+        let len = self.u32()? as usize;
+        let end = self
+            .pos
+            .checked_add(len)
+            .ok_or_else(|| format!("字符串长度溢出（偏移 {}）", self.pos))?;
+        let slice = self
+            .bytes
+            .get(self.pos..end)
+            .ok_or_else(|| format!("字符串字节不足（偏移 {}，长度 {}）", self.pos, len))?;
+        let s = String::from_utf8(slice.to_vec())
+            .map_err(|_| format!("字符串不是合法 UTF-8（偏移 {}）", self.pos))?;
+        self.pos = end;
+        Ok(s)
+    }
+
+    fn hash(&mut self) -> Result<Hash, String> {
+        let mut b = [0u8; 32];
+        for slot in &mut b {
+            *slot = self.take()?;
+        }
+        Ok(Hash(b))
+    }
+
+    /// 计数防御：拒绝明显不合理的长度，避免被恶意字节撑爆内存。
+    fn count(&mut self, what: &str) -> Result<usize, String> {
+        let n = self.u32()? as usize;
+        if n > self.bytes.len() {
+            return Err(format!("{} 数量 {} 超过剩余字节，拒绝解析", what, n));
+        }
+        Ok(n)
+    }
+}
+
+const PLACEHOLDER: fn() -> Span = || Span::new(0, 0);
+
+fn read_hir(r: &mut ByteReader) -> Result<Hir, String> {
+    r.expect(b'H', "文件头")?;
+    let semantics_version = r.str()?;
+    let n = r.count("节点")?;
+    let root = r.u32()?;
+    let mut nodes = Vec::with_capacity(n);
+    for _ in 0..n {
+        nodes.push(read_node(r)?);
+    }
+    Ok(Hir {
+        nodes,
+        root,
+        semantics_version,
+    })
+}
+
+fn read_node(r: &mut ByteReader) -> Result<HirNode, String> {
+    let kind_tag = r.take()?;
+    match kind_tag {
+        b'S' => {
+            let source = r.u32()?;
+            let kind = match r.take()? {
+                b'T' => SourceKind::Table {
+                    locator: r.str()?,
+                    schema_lock_hash: r.hash()?,
+                },
+                b'M' => SourceKind::MemoryTable {
+                    name: r.str()?,
+                    schema_lock_hash: r.hash()?,
+                },
+                other => {
+                    return Err(format!(
+                        "源种类标签非法 `{:?}`（偏移 {}）",
+                        other as char,
+                        r.pos - 1
+                    ));
+                }
+            };
+            let base = read_base(r)?;
+            Ok(HirNode::Source { base, source, kind })
+        }
+        b'R' => {
+            let kind = match r.take()? {
+                b'F' => TransformKind::Filter {
+                    pred: read_expr(r)?,
+                },
+                b'E' => {
+                    let n = r.count("extend 绑定")?;
+                    let mut bindings = Vec::with_capacity(n);
+                    for _ in 0..n {
+                        let output = r.u32()?;
+                        let name = r.str()?;
+                        let value = read_expr(r)?;
+                        bindings.push(crate::Binding {
+                            output,
+                            name,
+                            value,
+                        });
+                    }
+                    TransformKind::Extend { bindings }
+                }
+                b'P' => {
+                    let n = r.count("select 投影")?;
+                    let mut projections = Vec::with_capacity(n);
+                    for _ in 0..n {
+                        let output = r.u32()?;
+                        let name = r.str()?;
+                        let expr = read_expr(r)?;
+                        projections.push(crate::Projection { expr, output, name });
+                    }
+                    TransformKind::Select { projections }
+                }
+                b'D' => TransformKind::Distinct,
+                b'O' => {
+                    let n = r.count("sort 键")?;
+                    let mut keys = Vec::with_capacity(n);
+                    for _ in 0..n {
+                        let descending = match r.take()? {
+                            b'd' => true,
+                            b'a' => false,
+                            other => {
+                                return Err(format!(
+                                    "sort 方向标签非法 `{:?}`（偏移 {}）",
+                                    other as char,
+                                    r.pos - 1
+                                ));
+                            }
+                        };
+                        let expr = read_expr(r)?;
+                        keys.push(SortKeyH { expr, descending });
+                    }
+                    TransformKind::Sort { keys }
+                }
+                b'K' => TransformKind::Take { n: r.i64()? },
+                b'J' => TransformKind::Join { on: read_expr(r)? },
+                other => {
+                    return Err(format!(
+                        "变换种类标签非法 `{:?}`（偏移 {}）",
+                        other as char,
+                        r.pos - 1
+                    ));
+                }
+            };
+            let base = read_base(r)?;
+            Ok(HirNode::Transform { base, kind })
+        }
+        b'G' => {
+            let n_keys = r.count("分组键")?;
+            let mut group_keys = Vec::with_capacity(n_keys);
+            for _ in 0..n_keys {
+                let output = r.u32()?;
+                let name = r.str()?;
+                let value = read_expr(r)?;
+                group_keys.push(crate::GroupKeyH {
+                    value,
+                    output,
+                    name,
+                });
+            }
+            let n_bindings = r.count("聚合绑定")?;
+            let mut bindings = Vec::with_capacity(n_bindings);
+            for _ in 0..n_bindings {
+                let output = r.u32()?;
+                let name = r.str()?;
+                let call = read_agg_call(r)?;
+                bindings.push(AggBindingH { output, name, call });
+            }
+            let base = read_base(r)?;
+            Ok(HirNode::Aggregate {
+                base,
+                group_keys,
+                bindings,
+            })
+        }
+        b'X' => {
+            let kind = match r.take()? {
+                b'W' => TerminalKind::Write { path: r.str()? },
+                b'C' => TerminalKind::Collect,
+                b'N' => TerminalKind::Print,
+                other => {
+                    return Err(format!(
+                        "终端种类标签非法 `{:?}`（偏移 {}）",
+                        other as char,
+                        r.pos - 1
+                    ));
+                }
+            };
+            let base = read_base(r)?;
+            Ok(HirNode::Terminal { base, kind })
+        }
+        other => Err(format!(
+            "节点种类标签非法 `{:?}`（偏移 {}）",
+            other as char,
+            r.pos - 1
+        )),
+    }
+}
+
+fn read_base(r: &mut ByteReader) -> Result<NodeBase, String> {
+    let id = r.u32()?;
+    let n_inputs = r.count("节点输入")?;
+    let mut inputs = Vec::with_capacity(n_inputs);
+    for _ in 0..n_inputs {
+        inputs.push(r.u32()?);
+    }
+    let n_fields = r.count("schema 字段")?;
+    let mut fields = Vec::with_capacity(n_fields);
+    for _ in 0..n_fields {
+        let id = r.u32()?;
+        let name = r.str()?;
+        let ty = read_type(r)?;
+        let origin = match r.take()? {
+            b's' => FieldOrigin::Source {
+                source: r.u32()?,
+                source_field: r.str()?,
+            },
+            b'v' => FieldOrigin::Derived {
+                node: r.u32()?,
+                binding: r.str()?,
+            },
+            other => {
+                return Err(format!(
+                    "字段来源标签非法 `{:?}`（偏移 {}）",
+                    other as char,
+                    r.pos - 1
+                ));
+            }
+        };
+        fields.push(FieldSchema {
+            id,
+            name,
+            ty,
+            origin,
+        });
+    }
+    Ok(NodeBase {
+        id,
+        inputs,
+        output: Schema { fields },
+        span: PLACEHOLDER(),
+    })
+}
+
+fn read_agg_call(r: &mut ByteReader) -> Result<AggCallH, String> {
+    let func = match r.take()? {
+        b'c' => AggFunc::Count,
+        b's' => AggFunc::Sum,
+        b'm' => AggFunc::Min,
+        b'M' => AggFunc::Max,
+        b'a' => AggFunc::Avg,
+        other => {
+            return Err(format!(
+                "聚合函数标签非法 `{:?}`（偏移 {}）",
+                other as char,
+                r.pos - 1
+            ));
+        }
+    };
+    let arg = match r.take()? {
+        b'1' => Some(read_expr(r)?),
+        b'0' => None,
+        other => {
+            return Err(format!(
+                "聚合参数标签非法 `{:?}`（偏移 {}）",
+                other as char,
+                r.pos - 1
+            ));
+        }
+    };
+    Ok(AggCallH { func, arg })
+}
+
+fn read_expr(r: &mut ByteReader) -> Result<THirExpr, String> {
+    let tag = r.take()?;
+    match tag {
+        b'L' => {
+            let value = match r.take()? {
+                b'i' => Literal::Int(r.i64()?),
+                b'f' => Literal::Float(r.f64()?),
+                b'c' => Literal::Str(r.str()?),
+                b'1' => Literal::Bool(true),
+                b'0' => Literal::Bool(false),
+                b'n' => Literal::Null,
+                other => {
+                    return Err(format!(
+                        "字面量标签非法 `{:?}`（偏移 {}）",
+                        other as char,
+                        r.pos - 1
+                    ));
+                }
+            };
+            let ty = read_type(r)?;
+            Ok(THirExpr::Literal {
+                value,
+                ty,
+                span: PLACEHOLDER(),
+            })
+        }
+        b'F' => {
+            let field = r.u32()?;
+            let ty = read_type(r)?;
+            Ok(THirExpr::Field {
+                field,
+                ty,
+                span: PLACEHOLDER(),
+            })
+        }
+        b'B' => {
+            let op = read_binop(r)?;
+            let left = Box::new(read_expr(r)?);
+            let right = Box::new(read_expr(r)?);
+            let ty = read_type(r)?;
+            Ok(THirExpr::Binary {
+                op,
+                left,
+                right,
+                ty,
+                span: PLACEHOLDER(),
+            })
+        }
+        b'U' => {
+            let op = match r.take()? {
+                b'-' => UnaryOp::Negate,
+                b'!' => UnaryOp::Not,
+                other => {
+                    return Err(format!(
+                        "一元运算标签非法 `{:?}`（偏移 {}）",
+                        other as char,
+                        r.pos - 1
+                    ));
+                }
+            };
+            let expr = Box::new(read_expr(r)?);
+            let ty = read_type(r)?;
+            Ok(THirExpr::Unary {
+                op,
+                expr,
+                ty,
+                span: PLACEHOLDER(),
+            })
+        }
+        b'I' => {
+            let condition = Box::new(read_expr(r)?);
+            let then = Box::new(read_expr(r)?);
+            let else_ = Box::new(read_expr(r)?);
+            let ty = read_type(r)?;
+            Ok(THirExpr::If {
+                condition,
+                then,
+                else_,
+                ty,
+                span: PLACEHOLDER(),
+            })
+        }
+        b'C' => {
+            let name = match r.take()? {
+                b'a' => BuiltinFn::Abs,
+                b'r' => BuiltinFn::Round,
+                b'l' => BuiltinFn::Lower,
+                b'u' => BuiltinFn::Upper,
+                b't' => BuiltinFn::Trim,
+                b'g' => BuiltinFn::Length,
+                b'k' => BuiltinFn::Contains,
+                b'z' => BuiltinFn::IsNull,
+                other => {
+                    return Err(format!(
+                        "内置函数标签非法 `{:?}`（偏移 {}）",
+                        other as char,
+                        r.pos - 1
+                    ));
+                }
+            };
+            let n = r.count("调用实参")?;
+            let mut args = Vec::with_capacity(n);
+            for _ in 0..n {
+                args.push(read_expr(r)?);
+            }
+            let ty = read_type(r)?;
+            Ok(THirExpr::Call {
+                name,
+                args,
+                ty,
+                span: PLACEHOLDER(),
+            })
+        }
+        // v0.1.1 的 cast：V + 目标类型 + 操作数 + 结果类型
+        b'V' => {
+            let to = read_type(r)?;
+            let expr = Box::new(read_expr(r)?);
+            let ty = read_type(r)?;
+            Ok(THirExpr::Cast {
+                expr,
+                to,
+                ty,
+                span: PLACEHOLDER(),
+            })
+        }
+        other => Err(format!(
+            "表达式标签非法 `{:?}`（偏移 {}）",
+            other as char,
+            r.pos - 1
+        )),
+    }
+}
+
+fn read_binop(r: &mut ByteReader) -> Result<BinOp, String> {
+    match r.take()? {
+        b'+' => Ok(BinOp::Add),
+        b'-' => Ok(BinOp::Sub),
+        b'*' => Ok(BinOp::Mul),
+        b'/' => Ok(BinOp::Div),
+        b'%' => Ok(BinOp::Mod),
+        b'=' => Ok(BinOp::Eq),
+        b'!' => Ok(BinOp::Neq),
+        b'>' => Ok(BinOp::Gt),
+        b'<' => Ok(BinOp::Lt),
+        b'G' => Ok(BinOp::Gte),
+        b'L' => Ok(BinOp::Lte),
+        b'&' => Ok(BinOp::And),
+        b'|' => Ok(BinOp::Or),
+        other => Err(format!(
+            "二元运算标签非法 `{:?}`（偏移 {}）",
+            other as char,
+            r.pos - 1
+        )),
+    }
+}
+
+fn read_type(r: &mut ByteReader) -> Result<Type, String> {
+    match r.take()? {
+        b'i' => Ok(Type::I64),
+        b'f' => Ok(Type::F64),
+        b'b' => Ok(Type::Bool),
+        b'c' => Ok(Type::Str),
+        b'?' => Ok(Type::Opt(Box::new(read_type(r)?))),
+        other => Err(format!(
+            "类型标签非法 `{:?}`（偏移 {}）",
+            other as char,
+            r.pos - 1
+        )),
+    }
+}
+
 fn encode_base(w: &mut ByteWriter, base: &crate::NodeBase) {
     w.u32(base.id);
     w.u32(base.inputs.len() as u32);
@@ -439,5 +967,49 @@ mod tests {
         assert_eq!(with_cast, canonical_bytes(&filter_over(cast_predicate())));
         // 两个程序当然不同
         assert_ne!(with_cast, plain);
+    }
+
+    // ---------- ch12：反序列化 roundtrip ----------
+
+    #[test]
+    fn roundtrip_plain_pipeline() {
+        let h = filter_over(THirExpr::Literal {
+            value: Literal::Bool(true),
+            ty: Type::Bool,
+            span: Span::new(0, 0),
+        });
+        let bytes = canonical_bytes(&h);
+        let back = canonical_hir(&bytes).expect("解析");
+        assert_eq!(canonical_bytes(&back), bytes, "roundtrip 字节应逐位一致");
+        assert_eq!(roundtrip_hash(&bytes).unwrap(), hir_hash(&h));
+    }
+
+    #[test]
+    fn roundtrip_cast_pipeline() {
+        let h = filter_over(cast_predicate());
+        let bytes = canonical_bytes(&h);
+        let back = canonical_hir(&bytes).expect("解析");
+        assert_eq!(canonical_bytes(&back), bytes, "roundtrip 字节应逐位一致");
+        assert_eq!(roundtrip_hash(&bytes).unwrap(), hir_hash(&h));
+        // span 占位不影响哈希：原 HIR 与反序列化 HIR 的 canonical 哈希相同
+        assert!(back.validate().is_ok());
+    }
+
+    #[test]
+    fn roundtrip_rejects_corrupt_input() {
+        let bytes = canonical_bytes(&filter_over(cast_predicate()));
+        // 单字节翻转 → 要么解析失败，要么哈希必变（两者都必须被 verifier 抓住）
+        let mut tampered = bytes.clone();
+        let idx = tampered.len() / 2;
+        tampered[idx] ^= 0x01;
+        if let Ok(h) = canonical_hir(&tampered) {
+            assert_ne!(hir_hash(&h), hir_hash(&canonical_hir(&bytes).unwrap()));
+        }
+        // 尾随垃圾 → 拒绝
+        let mut trailing = bytes.clone();
+        trailing.push(0xff);
+        assert!(canonical_hir(&trailing).is_err());
+        // 截断 → 拒绝
+        assert!(canonical_hir(&bytes[..bytes.len() - 1]).is_err());
     }
 }

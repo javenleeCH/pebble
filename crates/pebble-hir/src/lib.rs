@@ -1,5 +1,5 @@
 //! pebble-hir：typed Logical HIR、Schema lock、BackendArtifact、Manifest/Receipt、
-//! canonical 序列化与内容寻址哈希。
+//! canonical 序列化与内容寻址哈希、证据签名（M2）。
 //!
 //! HIR 是所有后端（DuckDB SQL / LaTeX / 未来原生）的唯一输入边界。
 //! Span 仅用于诊断；canonical 序列化剔除 Span、注释与别名拼写。
@@ -7,11 +7,15 @@
 pub mod canonical;
 pub mod lock;
 pub mod manifest;
+pub mod sign;
 
 pub use lock::{LockField, LockSource, LockType, SchemaLock};
 pub use manifest::{
     BackendArtifact, BackendIdentity, CanonicalConfig, CanonicalTerminalOptions, DatasetIdentity,
     ExecutionManifest, ExecutionReceipt, ExecutionStatus, InputValidation, RunCode,
+};
+pub use sign::{
+    ApproverKey, SignatureStatus, hex_decode, hex_encode, sign_manifest, verify_manifest_signature,
 };
 
 use pebble_diagnostic::Span;

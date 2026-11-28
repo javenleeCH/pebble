@@ -288,4 +288,15 @@ v0.1.1（2026-11-27，教程第 11 章）：`having` 是语法糖，lowering 成
 同批修复（都是「对的程序编译不过」或「语义差集」）：常量表达式里的内置函数调用被误报为 SEM-016；混合类型的常量除零（`1.5 / 0`）未被诊断；`trim` 沿用 DuckDB 默认行为、不去制表符。
 已知语义差集（未修）：`lower` / `upper` 的三处结果与规范的 Unicode 全映射不一致（DuckDB 实现为简单映射）。消除差集需要在 SQL 里为一百余个特殊码点写守卫，或把规范改为简单映射——属于语言设计决定，待定。
 
-下一步（按序，2026-11-28 修订）：**M2 证据签名与独立 verifier（第 12 章，进行中）** → 威胁模型与恶意查询测试集、Kleene 反例矩阵等语义边界测试 → v0.1.1 剩余项（字符串函数、join/distinct/write/print 硬化、Schema 版本仓库）与 `lower`/`upper` 差集的决定 → M3 宿主 SDK 与资源配额 → M4 MLIR 原生后端（主路线；Cranelift 研究对照）→ M5 设计伙伴。Polars 第二后端已取消。
+下一步（按序，2026-11-28 修订）：~~**M2 证据签名与独立 verifier（第 12 章，进行中）**~~（已完成，见下）→ 威胁模型与恶意查询测试集、Kleene 反例矩阵等语义边界测试 → v0.1.1 剩余项（字符串函数、join/distinct/write/print 硬化、Schema 版本仓库）与 `lower`/`upper` 差集的决定 → M3 宿主 SDK 与资源配额 → M4 MLIR 原生后端（主路线；Cranelift 研究对照）→ M5 设计伙伴。Polars 第二后端已取消。
+
+### 7.2 M2 执行状态（2026-11-28，教程第 12 章）
+
+**证据签名与独立 verifier 已实现并验收**（verifier 攻防矩阵 8 测全绿）：
+
+- `pebble-hir::sign`：ed25519 审批密钥（`pebble keygen`）、manifest 主体签名（`pebble sign`）、公钥验签；未签名 manifest 的字节与 M0/v0.1.1 完全一致（`skip_serializing_if` 空签名），旧回执核对不受影响。
+- `canonical.rs` 反序列化 + roundtrip：verifier 可从 canonical 字节重算 `hir_hash`，不经过编译器主路径；含计数防御与尾随垃圾拒绝。
+- 新 crate `pebble-verifier`：六项独立检查（签名/工件/HIR roundtrip/回执绑定/数据快照/结构不变量），失败可定位到单项；运行时依赖面仅 `pebble-hir` + JSON，不加载 parser/semantics/codegen。
+- 顺序契约：build → sign → run → verify（签名改变 manifest_hash，回执绑定的必须是已审版本）。
+- CI 第七道门禁：verifier 攻防矩阵（篡改 plan.sql/canonical.hir/manifest 主体/数据/公钥逐一必被相应检查项抓到）。
+- 已知边界：私钥管理、签名前的 build 机欺骗、执行侧自证性（M4 议题）——见 ch12「诚实边界」。

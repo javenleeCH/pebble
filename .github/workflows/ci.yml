@@ -68,15 +68,23 @@ jobs:
       - name: Tutorial contract gate（教程驱动开发）
         run: cargo test -p pebble-driver --test docs_gate --locked
 
-      - name: Four-act demo smoke（README 快速上手即门禁）
+      - name: Verifier gate（M2 签名 + 篡改检测攻防矩阵）
+        run: cargo test -p pebble-verifier --locked
+
+      - name: Signed-evidence smoke（README 快速上手即门禁：keygen → build → sign → run → verify → verifier）
         shell: bash
         run: |
           set -e
+          KEY=/tmp/approver.json
+          cargo run -q -p pebble-driver -- keygen --out "$KEY"
           cargo run -q -p pebble-driver -- build examples/00_m0_revenue.pebble --locks tests/locks
+          cargo run -q -p pebble-driver -- sign examples/target/pebble/00_m0_revenue/manifest.json --key "$KEY"
           cargo run -q -p pebble-driver -- run examples/target/pebble/00_m0_revenue
           cargo run -q -p pebble-driver -- verify \
             examples/target/pebble/00_m0_revenue/manifest.json \
-            examples/target/pebble/00_m0_revenue/receipt.json
+            examples/target/pebble/00_m0_revenue/receipt.json \
+            --pubkey "$KEY"
+          cargo run -q -p pebble-verifier -- examples/target/pebble/00_m0_revenue --pubkey "$KEY"
 
       - name: Release build
         run: cargo build --release --locked

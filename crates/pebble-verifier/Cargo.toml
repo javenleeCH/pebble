@@ -1,0 +1,26 @@
+[package]
+name = "pebble-verifier"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "pebble_verifier"
+path = "src/lib.rs"
+
+[[bin]]
+name = "pebble-verifier"
+path = "src/main.rs"
+
+[dependencies]
+# 依赖面是本 crate 的立身之本：只有数据模型层 + JSON + 哈希 + CLI，
+# 不加载 parser/semantics/codegen——验证编译器产物时不需要编译器本体。
+pebble-hir = { path = "../pebble-hir" }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+clap = { workspace = true }
+
+[dev-dependencies]
+# 集成测试需要先「制造」证据（build/sign），但这只在测试里出现：
+# verifier 的运行时依赖面不受 dev-dependencies 影响。
+pebble-driver = { path = "../pebble-driver" }

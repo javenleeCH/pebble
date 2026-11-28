@@ -8,6 +8,7 @@ members = [
     "crates/pebble-duckdb",
     "crates/pebble-latex",
     "crates/pebble-driver",
+    "crates/pebble-verifier",
 ]
 
 [workspace.package]

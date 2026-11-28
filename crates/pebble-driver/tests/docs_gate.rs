@@ -35,6 +35,7 @@ const CHAPTERS: &[&str] = &[
     "ch09-语义层错误恢复.md",
     "ch10-codegen融合.md",
     "ch11-having与cast.md",
+    "ch12-签名与verifier.md",
     "appendix-ci-发布门禁.md",
 ];
 
@@ -144,6 +145,12 @@ fn tutorial_referenced_assets_exist() {
         "tests/data/strings.csv",
         "tests/locks/casts_csv.lock.json",
         "tests/locks/strings_csv.lock.json",
+        // ch12：签名与独立 verifier
+        "crates/pebble-hir/src/sign.rs",
+        "crates/pebble-verifier/Cargo.toml",
+        "crates/pebble-verifier/src/lib.rs",
+        "crates/pebble-verifier/src/main.rs",
+        "crates/pebble-verifier/tests/verifier.rs",
         "crates/pebble-driver/tests/differential.rs",
         "crates/pebble-parser/tests/recovery.rs",
         "crates/pebble-driver/tests/diagnostics.rs",

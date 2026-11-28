@@ -100,13 +100,21 @@ pub struct ExecutionManifest {
     /// 如非空：run 时实际引擎版本必须与其一致，否则 verify 失败。
     #[serde(default)]
     pub engine_version_requirement: String,
+    /// M2 证据签名（ch12）：审批者私钥对本 manifest 主体（signature 置空序列化）的
+    /// ed25519 签名，格式 `ed25519:<hex>`。
+    /// - 签名覆盖主体但不覆盖自身，manifest_hash 覆盖含签名的整体；
+    /// - 空值跳过序列化（`skip_serializing_if`），因此**未签名的 manifest 字节与 M0/v0.1.1
+    ///   完全一致**——旧 receipt 对旧 manifest 的核对不受影响；
+    /// - 公钥不入 manifest：验签公钥必须来自可信的外部渠道，写在被验对象里等于没验。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub signature: String,
 }
 
 impl ExecutionManifest {
     pub const MANIFEST_VERSION: u32 = 1;
 
-    /// manifest 主体的规范字节（不含 manifest_hash 自身）。
-    fn canonical_bytes(&self) -> Vec<u8> {
+    /// manifest 主体的规范字节。签名时以 signature 置空的副本调用（ch12）。
+    pub fn canonical_bytes(&self) -> Vec<u8> {
         // serde 结构体字段顺序稳定；BTree 确保集合顺序稳定。
         serde_json::to_vec(self).expect("manifest 序列化")
     }
@@ -236,6 +244,7 @@ mod tests {
             engine_config: CanonicalConfig { threads: 1 },
             terminal_options: CanonicalTerminalOptions::Collect,
             engine_version_requirement: String::new(),
+            signature: String::new(),
         }
     }
 

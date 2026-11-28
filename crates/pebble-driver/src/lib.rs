@@ -176,6 +176,8 @@ pub fn cmd_build(
         engine_config: CanonicalConfig { threads: 1 },
         terminal_options,
         engine_version_requirement: pin_duckdb.unwrap_or_default(),
+        // M2（ch12）：build 只产未签名 manifest；签名是审批者的事（pebble sign）
+        signature: String::new(),
     };
     let manifest_hash = manifest.compute_hash();
 
@@ -241,6 +243,12 @@ pub struct RunOutcome {
 /// `pebble run <build_dir> [--duckdb <path>]`
 pub fn cmd_run(build_dir: &Path, duckdb: Option<&Path>) -> Result<RunOutcome, String> {
     let manifest: ExecutionManifest = load_json(&build_dir.join("manifest.json"))?;
+    // M2：未签名 manifest 照常执行（一致性证据链完整），但显式降级声明
+    if manifest.signature.is_empty() {
+        println!(
+            "[警告] manifest 未签名：证据链只有一致性，没有真实性（先 `pebble sign` 再 run 可消除）"
+        );
+    }
     let plan_sql = std::fs::read_to_string(build_dir.join("plan.sql"))
         .map_err(|e| format!("读取 plan.sql 失败: {}", e))?;
     let validations: Vec<serde_json::Value> = load_json(&build_dir.join("validations.json"))?;
@@ -561,11 +569,97 @@ fn load_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T, String> {
 
 // ---------- verify ----------
 
-/// `pebble verify <manifest.json> <receipt.json>`；Ok(()) = APPROVED。
+/// `pebble verify <manifest.json> <receipt.json>`：一致性 + 绑定核验；Ok(()) = APPROVED。
 pub fn cmd_verify(manifest_path: &Path, receipt_path: &Path) -> Result<(), Vec<String>> {
     let manifest: ExecutionManifest = load_json(manifest_path).map_err(|e| vec![e])?;
     let receipt: ExecutionReceipt = load_json(receipt_path).map_err(|e| vec![e])?;
     pebble_hir::manifest::verify(&manifest, &receipt)
+}
+
+/// `pebble verify --pubkey ...`：在绑定核验之外加验 manifest 的 ed25519 签名（M2，ch12）。
+pub fn cmd_verify_signed(
+    manifest_path: &Path,
+    receipt_path: &Path,
+    pub_key: Option<&str>,
+) -> Result<(), Vec<String>> {
+    let manifest: ExecutionManifest = load_json(manifest_path).map_err(|e| vec![e])?;
+    let receipt: ExecutionReceipt = load_json(receipt_path).map_err(|e| vec![e])?;
+    let mut problems = pebble_hir::manifest::verify(&manifest, &receipt)
+        .err()
+        .unwrap_or_default();
+    match pub_key {
+        Some(p) => {
+            let key = resolve_pubkey(p)?;
+            if let Err(e) = pebble_hir::verify_manifest_signature(&manifest, &key) {
+                problems.push(format!("签名核验失败：{}", e));
+            }
+        }
+        None => {
+            if !manifest.signature.is_empty() {
+                problems.push(
+                    "manifest 已签名但未提供 --pubkey：签名未核验（用 --pubkey 或 pebble-verifier）"
+                        .into(),
+                );
+            }
+        }
+    }
+    if problems.is_empty() {
+        Ok(())
+    } else {
+        Err(problems)
+    }
+}
+
+/// 公钥参数解析：64 位 hex 直接收，否则按密钥文件（JSON，取 public 字段）。
+fn resolve_pubkey(arg: &str) -> Result<String, Vec<String>> {
+    let arg_trimmed = arg.trim();
+    let err = |msg: &str| vec![msg.to_string()];
+    if arg_trimmed.len() == 64 && arg_trimmed.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Ok(arg_trimmed.to_ascii_lowercase());
+    }
+    let path = Path::new(arg_trimmed);
+    if path.exists() {
+        let text =
+            std::fs::read_to_string(path).map_err(|e| err(&format!("读取公钥文件失败: {}", e)))?;
+        let key: pebble_hir::ApproverKey = serde_json::from_str(&text)
+            .map_err(|e| err(&format!("公钥文件不是合法密钥 JSON: {}", e)))?;
+        return Ok(key.public);
+    }
+    Err(err("--pubkey 需要 64 位 hex 或密钥文件路径"))
+}
+
+// ---------- keygen / sign（M2，ch12） ----------
+
+/// `pebble keygen --out <key.json>`：生成审批密钥对。
+/// **seed 是私钥**：文件必须保密；泄露即任何人都能签出「合法审批」。
+pub fn cmd_keygen(out: &Path) -> Result<pebble_hir::ApproverKey, String> {
+    let key = pebble_hir::ApproverKey::generate();
+    std::fs::write(out, key.to_json()).map_err(|e| format!("写出密钥文件失败: {}", e))?;
+    Ok(key)
+}
+
+/// `pebble sign <manifest.json> --key <key.json>`：审批动作——把签名写进 manifest。
+///
+/// 顺序契约（重要）：**build → sign → run → verify**。
+/// 签名改变 manifest 字节，manifest_hash 随之改变；receipt 绑定的是
+/// 「run 时读到的 manifest」——所以必须先签名再执行，回执绑定的才是已审版本。
+pub fn cmd_sign(manifest_path: &Path, key_path: &Path) -> Result<(String, String), String> {
+    let key_text = std::fs::read_to_string(key_path).map_err(|e| format!("读取密钥失败: {}", e))?;
+    let key = pebble_hir::ApproverKey::from_json(&key_text)?;
+    let text =
+        std::fs::read_to_string(manifest_path).map_err(|e| format!("读取 manifest 失败: {}", e))?;
+    let manifest: ExecutionManifest =
+        serde_json::from_str(&text).map_err(|e| format!("解析 manifest 失败: {}", e))?;
+    let signature = pebble_hir::sign_manifest(&manifest, &key)?;
+    let mut signed = manifest.clone();
+    signed.signature = signature.clone();
+    let manifest_hash = format!("sha256:{}", signed.compute_hash());
+    std::fs::write(
+        manifest_path,
+        serde_json::to_vec_pretty(&signed).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| format!("写回 manifest 失败: {}", e))?;
+    Ok((signature, manifest_hash))
 }
 
 // ---------- lock ----------

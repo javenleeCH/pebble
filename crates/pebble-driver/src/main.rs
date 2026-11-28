@@ -44,6 +44,23 @@ enum Cmd {
         manifest: PathBuf,
         /// receipt.json
         receipt: PathBuf,
+        /// 审批公钥（64 位 hex 或 `pebble keygen` 的密钥文件）；提供则核验签名
+        #[arg(long)]
+        pubkey: Option<String>,
+    },
+    /// 生成审批密钥对（M2）：seed 是私钥，文件必须保密
+    Keygen {
+        /// 输出密钥文件路径
+        #[arg(long, default_value = "approver-key.json")]
+        out: PathBuf,
+    },
+    /// 审批：用私钥签署 manifest（build → sign → run → verify 的固定顺序）
+    Sign {
+        /// 待签的 manifest.json
+        manifest: PathBuf,
+        /// 审批私钥文件（`pebble keygen` 生成）
+        #[arg(long)]
+        key: PathBuf,
     },
     /// 生成 Schema lock：pebble lock <table|memory> <locator|name> [--data-file f] name:type[?]...
     Lock {
@@ -105,7 +122,11 @@ fn main() {
                 }
             }
         }
-        Cmd::Verify { manifest, receipt } => match pebble_driver::cmd_verify(&manifest, &receipt) {
+        Cmd::Verify {
+            manifest,
+            receipt,
+            pubkey,
+        } => match pebble_driver::cmd_verify_signed(&manifest, &receipt, pubkey.as_deref()) {
             Ok(()) => {
                 println!("APPROVED PLAN == EXECUTED PLAN");
                 0
@@ -116,6 +137,34 @@ fn main() {
                 }
                 println!("VERIFY FAILED");
                 4
+            }
+        },
+        Cmd::Keygen { out } => match pebble_driver::cmd_keygen(&out) {
+            Ok(key) => {
+                println!("审批密钥已写出: {}", out.display());
+                println!("  algorithm = {}", key.algorithm);
+                println!("  public   = {}", key.public);
+                println!("  ⚠ seed 即私钥：妥善保管，泄露即任何人都能伪造审批");
+                0
+            }
+            Err(e) => {
+                eprintln!("[pebble] {}", e);
+                1
+            }
+        },
+        Cmd::Sign { manifest, key } => match pebble_driver::cmd_sign(&manifest, &key) {
+            Ok((signature, manifest_hash)) => {
+                println!("manifest 已签名: {}", manifest.display());
+                println!("  signature     = {}", signature);
+                println!(
+                    "  manifest_hash  = {}（run 将绑定此已审版本）",
+                    manifest_hash
+                );
+                0
+            }
+            Err(e) => {
+                eprintln!("[pebble] {}", e);
+                1
             }
         },
         Cmd::Lock { out, args } => match pebble_driver::cmd_lock(&args, &out) {

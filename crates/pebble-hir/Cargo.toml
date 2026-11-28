@@ -9,3 +9,7 @@ pebble-diagnostic = { path = "../pebble-diagnostic" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
+# M2 证据签名：manifest 用 ed25519 签名（ch12）。
+# MSRV：ed25519-dalek 2.x 与 rand 0.8 的 MSRV 均低于 1.85。
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+rand = "0.8"
