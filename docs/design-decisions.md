@@ -288,7 +288,7 @@ v0.1.1（2026-11-27，教程第 11 章）：`having` 是语法糖，lowering 成
 同批修复（都是「对的程序编译不过」或「语义差集」）：常量表达式里的内置函数调用被误报为 SEM-016；混合类型的常量除零（`1.5 / 0`）未被诊断；`trim` 沿用 DuckDB 默认行为、不去制表符。
 已知语义差集（未修）：`lower` / `upper` 的三处结果与规范的 Unicode 全映射不一致（DuckDB 实现为简单映射）。消除差集需要在 SQL 里为一百余个特殊码点写守卫，或把规范改为简单映射——属于语言设计决定，待定。
 
-下一步（按序，2026-11-28 修订）：~~**M2 证据签名与独立 verifier（第 12 章，进行中）**~~（已完成，见下）→ 威胁模型与恶意查询测试集、Kleene 反例矩阵等语义边界测试 → v0.1.1 剩余项（字符串函数、join/distinct/write/print 硬化、Schema 版本仓库）与 `lower`/`upper` 差集的决定 → M3 宿主 SDK 与资源配额 → M4 MLIR 原生后端（主路线；Cranelift 研究对照）→ M5 设计伙伴。Polars 第二后端已取消。
+下一步（按序，2026-11-28 修订）：~~M2~~（✅ ch12）→ ~~威胁模型与恶意查询测试集~~（✅ ch13）→ 更多语义边界测试（Kleene 反例矩阵、除零/溢出动态用例）→ v0.1.1 剩余项（字符串函数、join/distinct/write/print 硬化、Schema 版本仓库）与 `lower`/`upper` 差集的决定 → ~~M3 宿主 SDK 与资源配额~~（✅ ch13）→ M4 MLIR 原生后端（主路线；Cranelift 研究对照）→ M5 设计伙伴。Polars 第二后端已取消。
 
 ### 7.2 M2 执行状态（2026-11-28，教程第 12 章）
 
@@ -300,3 +300,16 @@ v0.1.1（2026-11-27，教程第 11 章）：`having` 是语法糖，lowering 成
 - 顺序契约：build → sign → run → verify（签名改变 manifest_hash，回执绑定的必须是已审版本）。
 - CI 第七道门禁：verifier 攻防矩阵（篡改 plan.sql/canonical.hir/manifest 主体/数据/公钥逐一必被相应检查项抓到）。
 - 已知边界：私钥管理、签名前的 build 机欺骗、执行侧自证性（M4 议题）——见 ch12「诚实边界」。
+
+### 7.3 M3 执行状态（2026-11-28，教程第 13 章）
+
+**资源配额与威胁模型已实现并验收**（budget 9 测 + verifier 第 7 项检查全绿）：
+
+- Schema lock 新增 `max_rows`（宿主行数上界承诺，进主体哈希）：`pebble lock --max-rows N`。
+- 静态成本模型（`pebble-driver/src/budget.rs`）：从源 max_rows 推导最坏情况输出行数；join 是唯一乘法算子（saturating u128）；take/聚合收窄；全局聚合=1。预算与配额进 manifest，**审批者在签名前就能看到最坏情况**。
+- 配额：`build --quota-rows N` 超限即拒绝（SEM-018，span 指向肇事 join）；缺 max_rows 的源 + 配额 → 同样拒绝（不静默降级）。
+- 超时：`run --timeout-secs N`，到期杀引擎 → RUN-004（轮询 try_wait + kill）。
+- 内存上限：`SET memory_limit = '512MB';` 进 canonical SQL 前言 + `engine_config.memory_limit_mb` 进 manifest——运行时资源上限是被审内容。
+- OOM 分类：DuckDB 报 "Out of Memory"/"memory limit" → RUN-004；其余引擎错误 → RUN-003。
+- 威胁模型：`docs/threat-model.md`——12 格攻防矩阵，每行至少一个自动化测试；「明确不防」列了四条，不吹。
+- verifier 第七项检查：预算↔配额一致性（配额存在但预算缺失 = manifest 被篡改）。

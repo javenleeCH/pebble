@@ -54,7 +54,7 @@ fn all_examples_compile() {
     ];
     for ex in examples {
         let out = out_dir(&format!("compile-{}", ex.trim_end_matches(".pebble")));
-        let result = cmd_build(&example(ex), &locks_dir(), &out, None);
+        let result = cmd_build(&example(ex), &locks_dir(), &out, None, None);
         assert!(result.is_ok(), "编译 {} 失败", ex);
     }
 }
@@ -64,8 +64,22 @@ fn build_is_deterministic() {
     set_repo_cwd();
     let a = out_dir("det-a");
     let b = out_dir("det-b");
-    let r1 = cmd_build(&example("00_m0_revenue.pebble"), &locks_dir(), &a, None).expect("build 1");
-    let r2 = cmd_build(&example("00_m0_revenue.pebble"), &locks_dir(), &b, None).expect("build 2");
+    let r1 = cmd_build(
+        &example("00_m0_revenue.pebble"),
+        &locks_dir(),
+        &a,
+        None,
+        None,
+    )
+    .expect("build 1");
+    let r2 = cmd_build(
+        &example("00_m0_revenue.pebble"),
+        &locks_dir(),
+        &b,
+        None,
+        None,
+    )
+    .expect("build 2");
     assert_eq!(r1.hir_hash, r2.hir_hash, "重复编译的 HIR hash 必须一致");
     assert_eq!(r1.artifact_hash, r2.artifact_hash);
     assert_eq!(r1.manifest_hash, r2.manifest_hash);
@@ -76,7 +90,14 @@ fn verify_binds_receipt_to_manifest_and_detects_tamper() {
     set_repo_cwd();
     // 自包含：本测试自行 build，避免与其他测试的目录竞争
     let out = out_dir("verify-binding");
-    cmd_build(&example("00_m0_revenue.pebble"), &locks_dir(), &out, None).expect("build");
+    cmd_build(
+        &example("00_m0_revenue.pebble"),
+        &locks_dir(),
+        &out,
+        None,
+        None,
+    )
+    .expect("build");
     let manifest: pebble_hir::ExecutionManifest = serde_json::from_str(
         &std::fs::read_to_string(out.join("manifest.json")).expect("manifest"),
     )
@@ -122,9 +143,16 @@ fn verify_binds_receipt_to_manifest_and_detects_tamper() {
 fn run_without_duckdb_writes_failed_receipt() {
     set_repo_cwd();
     let out = out_dir("run-no-duckdb");
-    cmd_build(&example("00_m0_revenue.pebble"), &locks_dir(), &out, None).expect("build");
+    cmd_build(
+        &example("00_m0_revenue.pebble"),
+        &locks_dir(),
+        &out,
+        None,
+        None,
+    )
+    .expect("build");
     let missing = out.join("no-such-duckdb.exe");
-    let outcome = cmd_run(&out, Some(&missing)).expect("run 返回 outcome 而非 panic");
+    let outcome = cmd_run(&out, Some(&missing), None).expect("run 返回 outcome 而非 panic");
     assert!(!outcome.ok);
     let receipt: pebble_hir::ExecutionReceipt =
         serde_json::from_str(&std::fs::read_to_string(out.join("receipt.json")).expect("receipt"))
@@ -164,8 +192,15 @@ fn end_to_end_demo_when_duckdb_present() {
         return;
     }
     let out = out_dir("e2e");
-    cmd_build(&example("00_m0_revenue.pebble"), &locks_dir(), &out, None).expect("build");
-    let outcome = cmd_run(&out, None).expect("run");
+    cmd_build(
+        &example("00_m0_revenue.pebble"),
+        &locks_dir(),
+        &out,
+        None,
+        None,
+    )
+    .expect("build");
+    let outcome = cmd_run(&out, None, None).expect("run");
     assert!(
         outcome.ok,
         "端到端执行必须成功: {:?}",
@@ -253,14 +288,14 @@ fn toctou_data_tamper_fails_run002_when_duckdb_present() {
     .unwrap();
 
     let out = tmp.join("build");
-    cmd_build(&src, &tmp, &out, None).expect("build");
-    let first = cmd_run(&out, None).expect("run 1");
+    cmd_build(&src, &tmp, &out, None, None).expect("build");
+    let first = cmd_run(&out, None, None).expect("run 1");
     assert!(first.ok, "首次执行应成功");
 
     // 篡改数据 → RUN-002（TOCTOU 检测）
     let rows = std::fs::read_to_string(&data).unwrap().replace("c2", "c9");
     std::fs::write(&data, rows).unwrap();
-    let second = cmd_run(&out, None).expect("run 2");
+    let second = cmd_run(&out, None, None).expect("run 2");
     assert!(!second.ok, "数据被篡改后必须失败");
     let receipt: pebble_hir::ExecutionReceipt =
         serde_json::from_str(&std::fs::read_to_string(out.join("receipt.json")).unwrap()).unwrap();
@@ -310,8 +345,8 @@ fn nonfinite_f64_input_fails_run001_when_duckdb_present() {
     )
     .unwrap();
     let out = tmp.join("build");
-    cmd_build(&src, &tmp, &out, None).expect("build");
-    let result = cmd_run(&out, None).expect("run");
+    cmd_build(&src, &tmp, &out, None, None).expect("build");
+    let result = cmd_run(&out, None, None).expect("run");
     assert!(!result.ok, "非有限 f64 输入必须失败（RUN-001）");
     let receipt: pebble_hir::ExecutionReceipt =
         serde_json::from_str(&std::fs::read_to_string(out.join("receipt.json")).unwrap()).unwrap();
@@ -369,9 +404,9 @@ fn extend_and_join_directly_on_source_run_when_duckdb_present() {
     )
     .unwrap();
     let out = tmp.join("extend");
-    cmd_build(&extend_src, &locks_dir(), &out, None)
+    cmd_build(&extend_src, &locks_dir(), &out, None, None)
         .expect("build：extend 作为第一个算子是合法程序");
-    let outcome = cmd_run(&out, None).expect("run");
+    let outcome = cmd_run(&out, None, None).expect("run");
     assert!(
         outcome.ok,
         "extend 作为第一个算子必须能执行: {:?}",
@@ -395,8 +430,8 @@ fn extend_and_join_directly_on_source_run_when_duckdb_present() {
     )
     .unwrap();
     let out = tmp.join("join");
-    cmd_build(&join_src, &locks_dir(), &out, None).expect("build");
-    let outcome = cmd_run(&out, None).expect("run");
+    cmd_build(&join_src, &locks_dir(), &out, None, None).expect("build");
+    let outcome = cmd_run(&out, None, None).expect("run");
     assert!(
         outcome.ok,
         "join 作为第一个算子生成的 SQL 必须能被 DuckDB 执行: {:?}",
@@ -444,8 +479,8 @@ fn fused_layers_match_a_plain_calculation_when_duckdb_present() {
         let path = tmp.join(format!("{name}.pebble"));
         std::fs::write(&path, src).unwrap();
         let out = tmp.join(name);
-        cmd_build(&path, &locks_dir(), &out, None).expect("build");
-        let outcome = cmd_run(&out, None).expect("run");
+        cmd_build(&path, &locks_dir(), &out, None, None).expect("build");
+        let outcome = cmd_run(&out, None, None).expect("run");
         assert!(outcome.ok, "{name}: {:?}", outcome.output_summary);
         assert!(cmd_verify(&out.join("manifest.json"), &outcome.receipt_path).is_ok());
         outcome

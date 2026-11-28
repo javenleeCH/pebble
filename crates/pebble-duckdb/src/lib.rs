@@ -30,9 +30,11 @@ const I64_MAX: &str = "9223372036854775807";
 pub const ARTIFACT_HEADER: &str = "-- pebble-duckdb artifact v2 (canonical)";
 
 /// 编译 HIR 为 DuckDB SQL 工件。lock_of 按 SourceKind 提供对应 Schema lock。
+/// memory_limit_mb 进 canonical SQL 前言——运行时资源上限是被审内容（ch13）。
 pub fn compile_sql(
     hir: &Hir,
     lock_of: &dyn Fn(&SourceKind) -> Option<SchemaLock>,
+    memory_limit_mb: u32,
 ) -> Result<BackendArtifact, String> {
     let cg = Codegen { hir, lock_of };
     let terminal = &hir.nodes[hir.root as usize];
@@ -56,7 +58,10 @@ pub fn compile_sql(
         }
         _ => final_select,
     };
-    let canonical_sql = format!("{ARTIFACT_HEADER}\nSET threads TO 1;\n{};\n", statement);
+    let canonical_sql = format!(
+        "{ARTIFACT_HEADER}\nSET threads TO 1;\nSET memory_limit = '{memory_limit_mb}MB';\n{};\n",
+        statement
+    );
     Ok(BackendArtifact::DuckDbSql { canonical_sql })
 }
 
@@ -1132,7 +1137,7 @@ Table("orders.csv") as o
     fn sql_of(src: &str) -> String {
         let hir = lower(src);
         let BackendArtifact::DuckDbSql { canonical_sql } =
-            compile_sql(&hir, &lock_for).expect("codegen");
+            compile_sql(&hir, &lock_for, 512).expect("codegen");
         canonical_sql
     }
 
@@ -1206,7 +1211,7 @@ Table("orders.csv") as o
     #[test]
     fn emits_canonical_sql_with_p0_guards() {
         let hir = build_m0_hir();
-        let artifact = compile_sql(&hir, &lock_for).expect("codegen");
+        let artifact = compile_sql(&hir, &lock_for, 512).expect("codegen");
         let BackendArtifact::DuckDbSql { canonical_sql } = artifact;
         // 前言：确定性引擎配置
         assert!(canonical_sql.starts_with(&format!("{ARTIFACT_HEADER}\nSET threads TO 1;")));
@@ -1297,7 +1302,7 @@ Table("orders.csv") as o
                 "Table(\"orders.csv\") as a\n  {op}\n  .collect()\n"
             ));
             let expected = format!(
-                "{ARTIFACT_HEADER}\nSET threads TO 1;\nSELECT {outer} FROM ({layer}) AS \"final\";\n"
+                "{ARTIFACT_HEADER}\nSET threads TO 1;\nSET memory_limit = '512MB';\nSELECT {outer} FROM ({layer}) AS \"final\";\n"
             );
             assert_eq!(sql, expected, "{op}");
         }

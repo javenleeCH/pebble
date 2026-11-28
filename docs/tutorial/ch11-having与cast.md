@@ -538,9 +538,12 @@ cargo run -p pebble-driver -- build tests/fixtures/codegen/having_demo.pebble --
 
 having 程序生成的 plan.sql（只调整了换行和缩进）：
 
+> `SET memory_limit = '512MB';` 前言是第 13 章加的。
+
 ```sql
 -- pebble-duckdb artifact v2 (canonical)
 SET threads TO 1;
+SET memory_limit = '512MB';
 SELECT "f5" AS "customer_id", "f6" AS "n", "f7" AS "total" FROM (
   SELECT "f5",
        "f6",
@@ -571,9 +574,12 @@ cargo run -p pebble-driver -- build tests/fixtures/codegen/cast_demo.pebble --lo
 
 cast 程序生成的 plan.sql（只调整了换行和缩进）：
 
+> `SET memory_limit = '512MB';` 前言是第 13 章加的。
+
 ```sql
 -- pebble-duckdb artifact v2 (canonical)
 SET threads TO 1;
+SET memory_limit = '512MB';
 SELECT "f0" AS "s", "f1" AS "x", "f3" AS "whole" FROM (
   SELECT "f0",
        "f1",

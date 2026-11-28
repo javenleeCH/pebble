@@ -36,6 +36,7 @@ const CHAPTERS: &[&str] = &[
     "ch10-codegen融合.md",
     "ch11-having与cast.md",
     "ch12-签名与verifier.md",
+    "ch13-资源配额.md",
     "appendix-ci-发布门禁.md",
 ];
 
@@ -151,6 +152,10 @@ fn tutorial_referenced_assets_exist() {
         "crates/pebble-verifier/src/lib.rs",
         "crates/pebble-verifier/src/main.rs",
         "crates/pebble-verifier/tests/verifier.rs",
+        // ch13：资源配额与威胁模型
+        "crates/pebble-driver/src/budget.rs",
+        "crates/pebble-driver/tests/budget.rs",
+        "docs/threat-model.md",
         "crates/pebble-driver/tests/differential.rs",
         "crates/pebble-parser/tests/recovery.rs",
         "crates/pebble-driver/tests/diagnostics.rs",
@@ -262,6 +267,7 @@ fn assert_tutorial_output_matches(chapter: &str, fixture: &str) {
         &repo.join("tests/fixtures/diagnostics").join(fixture),
         &repo.join("tests").join("locks"),
         &out,
+        None,
         None,
     ) {
         Ok(_) => panic!("{fixture} 是故意写错的，不应编译成功"),
@@ -376,6 +382,7 @@ fn assert_tutorial_sql_matches(chapter: &str, marker: &str, demo: &str) {
         &repo.join(demo),
         &repo.join("tests").join("locks"),
         &out,
+        None,
         None,
     )
     .unwrap_or_else(|e| panic!("{demo} 应当能编译: {e:?}"));

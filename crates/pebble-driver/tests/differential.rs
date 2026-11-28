@@ -99,8 +99,8 @@ fn run_to_csv(name: &str, src: &str) -> Vec<String> {
     let path = tmp.join("program.pebble");
     std::fs::write(&path, src.replace("{csv}", &csv_rel)).unwrap();
     let out = tmp.join(name);
-    cmd_build(&path, &locks_dir(), &out, None).expect("build");
-    let outcome = cmd_run(&out, None).expect("run");
+    cmd_build(&path, &locks_dir(), &out, None, None).expect("build");
+    let outcome = cmd_run(&out, None, None).expect("run");
     assert!(outcome.ok, "{name}: {:?}", outcome.output_summary);
     assert!(cmd_verify(&out.join("manifest.json"), &outcome.receipt_path).is_ok());
     std::fs::read_to_string(repo().join(&csv_rel))
@@ -376,7 +376,7 @@ fn existing_programs_keep_their_hir_hash() {
     let out = std::env::temp_dir().join("pebble-it").join("hash-pin");
     let _ = std::fs::remove_dir_all(&out);
     let src = repo().join("examples").join("00_m0_revenue.pebble");
-    let summary = cmd_build(&src, &locks_dir(), &out, None).expect("build");
+    let summary = cmd_build(&src, &locks_dir(), &out, None, None).expect("build");
     assert_eq!(
         summary.hir_hash,
         "sha256:4a895435e887280a4cdd4811b471b809329a505bc128b665de35b531c7026a69"

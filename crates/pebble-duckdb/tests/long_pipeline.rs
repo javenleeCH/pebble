@@ -45,7 +45,7 @@ fn codegen_of_a_long_pipeline_needs_no_call_stack_and_two_layers() {
         .stack_size(TINY_STACK)
         .spawn(move || {
             let lock_of = |_: &SourceKind| Some(orders_lock());
-            let sql = match pebble_duckdb::compile_sql(&hir, &lock_of).expect("codegen") {
+            let sql = match pebble_duckdb::compile_sql(&hir, &lock_of, 512).expect("codegen") {
                 BackendArtifact::DuckDbSql { canonical_sql } => canonical_sql,
             };
             // 谓词一个不少

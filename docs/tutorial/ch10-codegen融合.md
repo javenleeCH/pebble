@@ -395,9 +395,13 @@ cargo run -p pebble-driver -- build tests/fixtures/codegen/fusion_demo.pebble --
 
 最后一条命令生成的 plan.sql（只调整了换行和缩进）：
 
+> `SET memory_limit = '512MB';` 前言是第 13 章加的——运行时资源上限与 threads
+> 一样属于被审内容，它改变全部 canonical SQL（见 ch13 的顺序契约）。
+
 ```sql
 -- pebble-duckdb artifact v2 (canonical)
 SET threads TO 1;
+SET memory_limit = '512MB';
 SELECT "f0" AS "order_id", "f4" AS "customer_id", "f5" AS "doubled"
 FROM (
   SELECT "f0", "f4", "f5"

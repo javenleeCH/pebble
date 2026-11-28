@@ -31,6 +31,7 @@
 | 第一轮专家评审 | [`docs/review-2026-11-23.md`](docs/review-2026-11-23.md) |
 | 第二轮专家复审 | [`docs/review-r2-2026-11-23.md`](docs/review-r2-2026-11-23.md) |
 | M0 demo（证据链样例） | [`examples/00_m0_revenue.pebble`](examples/00_m0_revenue.pebble) |
+| 威胁模型 | [`docs/threat-model.md`](docs/threat-model.md) |
 | 样例与预期输出 | [`examples/`](examples/) |
 | EBNF 文法草案（Draft v0.2） | [`grammar/pebble.ebnf`](grammar/pebble.ebnf) |
 | 规范/内部设计（与定稿同步） | [`docs/draft/`](docs/draft/) |
@@ -59,6 +60,12 @@ cargo run -p pebble-driver -- verify examples/target/pebble/00_m0_revenue/manife
 
 # 6. 独立核验（审计员视角：不加载编译器，只凭工件 + 外部公钥）
 cargo run -p pebble-verifier -- examples/target/pebble/00_m0_revenue --pubkey approver.json
+
+# 7.（可选）资源配额：最坏情况输出超过 N 行即拒绝构建（ch13）
+cargo run -p pebble-driver -- build examples/00_m0_revenue.pebble --locks tests/locks --quota-rows 1000000
+
+# 8.（可选）执行超时：到期杀引擎 → RUN-004（ch13）
+cargo run -p pebble-driver -- run examples/target/pebble/00_m0_revenue --timeout-secs 30
 ```
 
 ## 五条红线

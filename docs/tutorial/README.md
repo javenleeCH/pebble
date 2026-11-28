@@ -31,13 +31,13 @@
 | [第 10 章](ch10-codegen融合.md) | codegen 融合：不是每个算子都要一层子查询（工件 v2） | `pebble-duckdb/src/lib.rs`、`pebble-hir/src/manifest.rs` | 见 git log |
 | [第 11 章](ch11-having与cast.md) | having 与受限 cast：给语言加一个特性的完整路径（v0.1.1） | `pebble-{parser,hir,semantics,duckdb,latex}`、`tests/differential.rs` | 见 git log |
 | [第 12 章](ch12-签名与verifier.md) | M2 证据签名与独立 verifier：堵住自洽伪造与既当运动员又当裁判 | `pebble-hir/src/{sign,canonical}.rs`、`crates/pebble-verifier/` | 见 git log |
+| [第 13 章](ch13-资源配额.md) | M3 资源配额与威胁模型：从「必然终止」到「有界资源」 | `pebble-driver/src/budget.rs`、`docs/threat-model.md` | 见 git log |
 | [附录 A](appendix-ci-发布门禁.md) | CI 与发布门禁：把纪律变成机器 | `.github/workflows/*`、`docs_gate.rs` | 见 git log |
 
 > M0 的实现以单个大提交 `3bccd59` 收口（教训：教程驱动应当「每章一 commit」）。从第 8 章起严格执行：一章一个 commit，读者 checkout 到该章的提交就能复现本章内容。
 
 ## 后续章节规划（实现一章、写一章）
 
-- 第 13 章：M3 宿主 SDK 与资源配额
 - 第 14 章：M4 MLIR 原生后端初探（主路线；Cranelift 研究对照）
 
 > 排序说明：codegen 融合（第 10 章）原本排在 `having/cast` 之后，提前是因为它修的是已发布后端的一个真实限制，

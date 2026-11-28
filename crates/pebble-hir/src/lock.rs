@@ -85,6 +85,10 @@ pub struct SchemaLock {
     pub lock_version: u32,
     pub source: LockSource,
     pub fields: Vec<LockField>,
+    /// ch13（M3 资源配额）：数据集的**行数上界**（宿主声明，非统计值）。
+    /// 进入主体哈希——虚报行数会破坏 lock 完整性。None = 不参与静态预算。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_rows: Option<u64>,
     /// 对 lock 主体（不含本字段自身）的 SHA-256。
     pub schema_hash: String,
 }
@@ -92,7 +96,7 @@ pub struct SchemaLock {
 impl SchemaLock {
     pub const LOCK_VERSION: u32 = 1;
 
-    /// 计算 lock 主体哈希（顺序、命名、类型、可空性全部进入哈希）。
+    /// 计算 lock 主体哈希（顺序、命名、类型、可空性、行数上界全部进入哈希）。
     pub fn compute_body_hash(&self) -> Hash {
         let mut body = String::new();
         body.push_str(&format!("lock_version={}\n", self.lock_version));
@@ -103,6 +107,9 @@ impl SchemaLock {
             LockSource::MemoryTable { name, .. } => {
                 body.push_str(&format!("source=memory\nname={}\n", name));
             }
+        }
+        if let Some(n) = self.max_rows {
+            body.push_str(&format!("max_rows={}\n", n));
         }
         for f in &self.fields {
             body.push_str(&format!(
@@ -144,12 +151,24 @@ impl SchemaLock {
         Ok(computed)
     }
 
-    /// 从字段定义生成 lock（自动计算哈希）。
+    /// 从字段定义生成 lock（自动计算哈希；max_rows 不参与静态预算时用 None）。
     pub fn build(source: LockSource, fields: Vec<LockField>) -> SchemaLock {
+        Self::build_with_max_rows(source, fields, None)
+    }
+
+    /// ch13：带行数上界生成 lock。上界进主体哈希——**它是承诺，不是猜测**：
+    /// 声明 max_rows=N 的宿主必须保证数据不超过 N 行（MemoryTable 由注册方负责；
+    /// 文件源由数据管线负责），静态预算的可信度等于这个承诺的可信度。
+    pub fn build_with_max_rows(
+        source: LockSource,
+        fields: Vec<LockField>,
+        max_rows: Option<u64>,
+    ) -> SchemaLock {
         let mut lock = SchemaLock {
             lock_version: Self::LOCK_VERSION,
             source,
             fields,
+            max_rows,
             schema_hash: String::new(),
         };
         let h = lock.compute_body_hash();

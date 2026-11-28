@@ -205,10 +205,15 @@ mod tests {
                 version: String::new(),
             },
             artifact_hash: "dd".into(),
-            engine_config: crate::CanonicalConfig { threads: 1 },
+            engine_config: crate::CanonicalConfig {
+                threads: 1,
+                memory_limit_mb: 512,
+            },
             terminal_options: crate::CanonicalTerminalOptions::Collect,
             engine_version_requirement: String::new(),
             signature: String::new(),
+            estimated_max_output_rows: None,
+            quota_rows: None,
         }
     }
 

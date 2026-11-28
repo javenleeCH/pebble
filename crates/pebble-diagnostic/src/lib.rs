@@ -80,6 +80,8 @@ pub enum Code {
     SemLiteralOutOfRange,
     SemConstDomain,
     SemAggMisuse,
+    /// ch13：静态成本模型——最坏情况输出行数超过配额（M3 资源预算）。
+    SemBudgetExceeded,
     // Schema
     SchNoSchema,
     SchJoinKeyMismatch,
@@ -125,6 +127,7 @@ impl Code {
             Code::SemLiteralOutOfRange => "SEM-015",
             Code::SemConstDomain => "SEM-016",
             Code::SemAggMisuse => "SEM-017",
+            Code::SemBudgetExceeded => "SEM-018",
             Code::SchNoSchema => "SCH-001",
             Code::SchJoinKeyMismatch => "SCH-002",
             Code::SchDuplicateOutput => "SCH-003",

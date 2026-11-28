@@ -57,7 +57,7 @@ fn key_from_file(path: &std::path::Path) -> ApproverKey {
 fn make_signed_evidence(name: &str) -> (PathBuf, PathBuf) {
     let base = sandbox(name);
     let out = base.join("build");
-    cmd_build(&demo_src(), &locks_dir(), &out, None).expect("build");
+    cmd_build(&demo_src(), &locks_dir(), &out, None, None).expect("build");
     // 固定 seed 的测试密钥（可复现；真密钥必须用 keygen 的 OS 随机源）
     let key = ApproverKey::from_seed([42u8; 32]);
     let key_file = base.join("approver.json");
@@ -65,7 +65,7 @@ fn make_signed_evidence(name: &str) -> (PathBuf, PathBuf) {
     cmd_sign(&out.join("manifest.json"), &key_file).expect("sign");
     // run 用不存在的 duckdb 路径：执行失败但回执绑定成立（失败也是证据）
     let missing = out.join("no-duckdb.exe");
-    cmd_run(&out, Some(&missing)).expect("run 产出回执");
+    cmd_run(&out, Some(&missing), None).expect("run 产出回执");
     (out, key_file)
 }
 
@@ -87,7 +87,7 @@ fn happy_path_all_checks_pass() {
     let report = verify_build_dir(&dir, &key.public);
     let rendered = pebble_verifier::render_report(&report);
     assert!(report.ok, "报告:\n{}", rendered);
-    assert_eq!(report.checks.len(), 6, "六项检查一个不少:\n{}", rendered);
+    assert_eq!(report.checks.len(), 7, "七项检查一个不少:\n{}", rendered);
 }
 
 #[test]
@@ -186,13 +186,13 @@ fn tamper_data_file_fails_toctou_check() {
     let src = base.join("pipeline.pebble");
     std::fs::write(&src, format!("Table(\"{data_path}\") as o\n  .collect()\n")).unwrap();
     let out = base.join("build");
-    cmd_build(&src, &base, &out, None).expect("build");
+    cmd_build(&src, &base, &out, None, None).expect("build");
     let key = ApproverKey::from_seed([42u8; 32]);
     let key_file = base.join("approver.json");
     std::fs::write(&key_file, key.to_json()).unwrap();
     cmd_sign(&out.join("manifest.json"), &key_file).expect("sign");
     let missing = out.join("no-duckdb.exe");
-    cmd_run(&out, Some(&missing)).expect("run 产出回执");
+    cmd_run(&out, Some(&missing), None).expect("run 产出回执");
 
     // 篡改私有数据 → TOCTOU 检查失败
     let rows = std::fs::read_to_string(&data).unwrap().replace("c2", "c9");
@@ -223,9 +223,9 @@ fn unsigned_manifest_fails_only_authenticity() {
     // 未签名 build：只有真实性失败，其余五项应通过——失败必须可定位
     let base = sandbox("unsigned");
     let out = base.join("build");
-    cmd_build(&demo_src(), &locks_dir(), &out, None).expect("build");
+    cmd_build(&demo_src(), &locks_dir(), &out, None, None).expect("build");
     let missing = out.join("no-duckdb.exe");
-    cmd_run(&out, Some(&missing)).expect("run 产出回执");
+    cmd_run(&out, Some(&missing), None).expect("run 产出回执");
     let key = ApproverKey::from_seed([42u8; 32]);
     let report = verify_build_dir(&out, &key.public);
     let rendered = pebble_verifier::render_report(&report);
@@ -258,7 +258,7 @@ fn every_example_hir_roundtrips_against_manifest() {
         let base = sandbox(&format!("roundtrip-{}", ex.trim_end_matches(".pebble")));
         let out = base.join("build");
         let src = repo().join("examples").join(ex);
-        cmd_build(&src, &locks_dir(), &out, None).expect("build");
+        cmd_build(&src, &locks_dir(), &out, None, None).expect("build");
         let bytes = std::fs::read(out.join("canonical.hir")).unwrap();
         let h = pebble_hir::canonical::roundtrip_hash(&bytes)
             .unwrap_or_else(|e| panic!("{} roundtrip 失败: {}", ex, e));

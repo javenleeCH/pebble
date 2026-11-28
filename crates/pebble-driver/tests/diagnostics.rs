@@ -28,7 +28,7 @@ fn build_failure(src: &Path, name: &str) -> CompileFailure {
     set_repo_cwd();
     let out = std::env::temp_dir().join("pebble-it").join(name);
     let _ = std::fs::remove_dir_all(&out);
-    let failure = match cmd_build(src, &repo().join("tests").join("locks"), &out, None) {
+    let failure = match cmd_build(src, &repo().join("tests").join("locks"), &out, None, None) {
         Ok(_) => panic!("{} 不应编译成功", src.display()),
         Err(f) => f,
     };
@@ -233,6 +233,7 @@ fn environment_failure_is_a_single_pebble_message() {
         &repo().join("tests/fixtures/diagnostics/no-such-file.pebble"),
         &repo().join("tests").join("locks"),
         &out,
+        None,
         None,
     ) {
         Ok(_) => panic!("不存在的源文件不应编译成功"),

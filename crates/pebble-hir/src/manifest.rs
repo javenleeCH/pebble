@@ -51,15 +51,26 @@ impl BackendArtifact {
     }
 }
 
-/// 规范引擎配置（M0：单线程保证聚合顺序确定性）。
+/// 规范引擎配置。全部字段进入 canonical SQL 前言与 manifest——配置即被审内容：
+/// - threads=1 保证浮点聚合求值顺序确定性（ch06）；
+/// - memory_limit（ch13）是运行时资源防线之一，上限必须在审批时可见。
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct CanonicalConfig {
     pub threads: u32,
+    #[serde(default = "default_memory_limit_mb")]
+    pub memory_limit_mb: u32,
+}
+
+fn default_memory_limit_mb() -> u32 {
+    512
 }
 
 impl Default for CanonicalConfig {
     fn default() -> Self {
-        CanonicalConfig { threads: 1 }
+        CanonicalConfig {
+            threads: 1,
+            memory_limit_mb: 512,
+        }
     }
 }
 
@@ -108,6 +119,14 @@ pub struct ExecutionManifest {
     /// - 公钥不入 manifest：验签公钥必须来自可信的外部渠道，写在被验对象里等于没验。
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub signature: String,
+    /// ch13（M3 资源配额）：静态成本模型的最坏情况输出行数上界。
+    /// None = 有源未声明 max_rows，无法建立预算（此时配额检查无法执行）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimated_max_output_rows: Option<u64>,
+    /// ch13：审批时批准的最坏情况输出行数（`build --quota-rows`）。
+    /// None = 本次构建未设配额。签名覆盖它——**改配额 = 改计划**。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quota_rows: Option<u64>,
 }
 
 impl ExecutionManifest {
@@ -241,10 +260,15 @@ mod tests {
                 version: String::new(),
             },
             artifact_hash: "dd".into(),
-            engine_config: CanonicalConfig { threads: 1 },
+            engine_config: CanonicalConfig {
+                threads: 1,
+                memory_limit_mb: 512,
+            },
             terminal_options: CanonicalTerminalOptions::Collect,
             engine_version_requirement: String::new(),
             signature: String::new(),
+            estimated_max_output_rows: None,
+            quota_rows: None,
         }
     }
 

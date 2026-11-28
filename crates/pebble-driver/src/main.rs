@@ -29,6 +29,9 @@ enum Cmd {
         /// pin DuckDB 精确版本（run/verify 校验实际引擎版本）
         #[arg(long)]
         pin_duckdb: Option<String>,
+        /// ch13：静态预算配额——最坏情况输出行数超过 N 即拒绝构建（SEM-018）
+        #[arg(long)]
+        quota_rows: Option<u64>,
     },
     /// 执行：数据哈希核对 + f64 预检 + 提交工件 → receipt
     Run {
@@ -37,6 +40,9 @@ enum Cmd {
         /// duckdb CLI 路径（默认 PATH 或 tools/duckdb.exe）
         #[arg(long)]
         duckdb: Option<PathBuf>,
+        /// ch13：执行超时秒数，到期杀引擎 → RUN-004（宁可取消，不可失控）
+        #[arg(long)]
+        timeout_secs: Option<u64>,
     },
     /// 核对：已审 manifest == 本次执行提交的工件？
     Verify {
@@ -79,9 +85,10 @@ fn main() {
             locks,
             out,
             pin_duckdb,
+            quota_rows,
         } => {
             let out = out.unwrap_or_else(|| pebble_driver::default_out_dir(&file));
-            match pebble_driver::cmd_build(&file, &locks, &out, pin_duckdb) {
+            match pebble_driver::cmd_build(&file, &locks, &out, pin_duckdb, quota_rows) {
                 Ok(s) => {
                     println!("pebble build 完成");
                     println!("  out_dir        = {}", s.out_dir.display());
@@ -101,27 +108,29 @@ fn main() {
                 }
             }
         }
-        Cmd::Run { build_dir, duckdb } => {
-            match pebble_driver::cmd_run(&build_dir, duckdb.as_deref()) {
-                Ok(out) => {
-                    if let Some(summary) = &out.output_summary {
-                        println!("{}", summary);
-                    }
-                    println!("receipt = {}", out.receipt_path.display());
-                    if out.ok {
-                        println!("run: OK");
-                        0
-                    } else {
-                        println!("run: FAILED（详见 receipt.json）");
-                        3
-                    }
+        Cmd::Run {
+            build_dir,
+            duckdb,
+            timeout_secs,
+        } => match pebble_driver::cmd_run(&build_dir, duckdb.as_deref(), timeout_secs) {
+            Ok(out) => {
+                if let Some(summary) = &out.output_summary {
+                    println!("{}", summary);
                 }
-                Err(e) => {
-                    eprintln!("[pebble] {}", e);
-                    1
+                println!("receipt = {}", out.receipt_path.display());
+                if out.ok {
+                    println!("run: OK");
+                    0
+                } else {
+                    println!("run: FAILED（详见 receipt.json）");
+                    3
                 }
             }
-        }
+            Err(e) => {
+                eprintln!("[pebble] {}", e);
+                1
+            }
+        },
         Cmd::Verify {
             manifest,
             receipt,

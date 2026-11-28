@@ -176,6 +176,24 @@ pub fn verify_build_dir(dir: &Path, pub_key_hex: &str) -> Report {
         });
     checks.push(check("HIR 结构不变量（validate）", invariant_check));
 
+    // 7. 预算↔配额一致性（ch13）：配额存在时预算必须存在且不超
+    let budget_check = match (&manifest.estimated_max_output_rows, &manifest.quota_rows) {
+        (Some(bound), Some(quota)) if *bound <= *quota => Ok(format!(
+            "最坏情况输出 {} ≤ 配额 {}（ch13 静态成本模型）",
+            bound, quota
+        )),
+        (Some(bound), Some(quota)) => Err(format!(
+            "预算 {} 超过配额 {}——manifest 被篡改或 build 时未执行配额检查",
+            bound, quota
+        )),
+        (Some(bound), None) => Ok(format!("最坏情况输出 {}（未设配额）", bound)),
+        (None, Some(_)) => Err(
+            "配额存在但预算缺失——manifest 被篡改（build 的配额检查不会产出这种组合）".to_string(),
+        ),
+        (None, None) => Ok("无预算（源缺 max_rows）且未设配额".to_string()),
+    };
+    checks.push(check("预算↔配额一致性（ch13）", budget_check));
+
     let ok = checks.iter().all(|c| c.ok);
     Report { checks, ok }
 }

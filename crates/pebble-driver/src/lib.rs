@@ -1,9 +1,12 @@
 //! pebble-driver：build / run / verify / lock 四幕证据链编排。
 //!
-//! build：源码 → canonical HIR + hash → DuckDB SQL 工件 → manifest。
-//! run：TOCTOU 数据哈希核对 → RUN-001 f64 预检 → 提交工件 → ExecutionReceipt。
+//! build：源码 → canonical HIR + hash → DuckDB SQL 工件 → manifest（含静态预算与配额）。
+//! run：TOCTOU 数据哈希核对 → RUN-001 f64 预检 → 提交工件 → ExecutionReceipt
+//!      （ch13 起：超时杀引擎、OOM 归类 RUN-004）。
 //! verify：核对「已审 manifest == 本次执行提交的工件」。
-//! lock：生成 Schema lock（schema-as-code）。
+//! lock：生成 Schema lock（schema-as-code，含 max_rows 行数上界承诺）。
+
+pub mod budget;
 
 use pebble_hir::{
     BackendArtifact, BackendIdentity, CanonicalConfig, CanonicalTerminalOptions, DatasetIdentity,
@@ -21,6 +24,18 @@ pub struct BuildSummary {
     pub hir_hash: String,
     pub artifact_hash: String,
     pub manifest_hash: String,
+}
+
+// expect_err / assert_eq 需要 Debug；手写避免逐字段 derive 的噪音
+impl std::fmt::Debug for BuildSummary {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BuildSummary")
+            .field("out_dir", &self.out_dir.display().to_string())
+            .field("hir_hash", &self.hir_hash)
+            .field("artifact_hash", &self.artifact_hash)
+            .field("manifest_hash", &self.manifest_hash)
+            .finish()
+    }
 }
 
 /// 编译/构建失败。
@@ -57,12 +72,54 @@ fn fail_msg(msg: &str) -> String {
     format!("[pebble] {}", msg)
 }
 
-/// `pebble build <file> --locks <dir> [--out <dir>] [--pin-duckdb <ver>]`
+/// ch13：配额要求静态预算，但有源缺 max_rows → 拒绝并指出缺承诺的源。
+fn budget_unavailable_diag(
+    program: &pebble_parser::Program,
+    catalog: &pebble_semantics::Catalog,
+    hir: &pebble_hir::Hir,
+) -> pebble_diagnostic::DiagBag {
+    let mut diags = pebble_diagnostic::DiagBag::new();
+    for node in &hir.nodes {
+        if let pebble_hir::HirNode::Source { kind, base, .. } = node {
+            let identity = match kind {
+                pebble_hir::SourceKind::Table { locator, .. } => format!("table:{}", locator),
+                pebble_hir::SourceKind::MemoryTable { name, .. } => format!("memory:{}", name),
+            };
+            let missing = catalog
+                .get(&identity)
+                .map(|l| l.max_rows.is_none())
+                .unwrap_or(true);
+            if missing {
+                diags.error(
+                    pebble_diagnostic::Code::SemBudgetExceeded,
+                    format!(
+                        "配额检查需要全部源声明行数上界：`{}` 的 lock 缺 max_rows",
+                        identity
+                    ),
+                    base.span,
+                );
+                return diags;
+            }
+        }
+    }
+    diags.error(
+        pebble_diagnostic::Code::SemBudgetExceeded,
+        "无法建立静态预算",
+        program.pipeline.span,
+    );
+    diags
+}
+
+/// `pebble build <file> --locks <dir> [--out <dir>] [--pin-duckdb <ver>] [--quota-rows N]`
+///
+/// ch13（M3）：`--quota-rows` 触发静态预算检查——最坏情况输出超过配额即拒绝构建
+/// （SEM-018，诊断指向肇事算子）；预算与配额都写入 manifest，成为被审内容。
 pub fn cmd_build(
     src: &Path,
     locks_dir: &Path,
     out_dir: &Path,
     pin_duckdb: Option<String>,
+    quota_rows: Option<u64>,
 ) -> Result<BuildSummary, CompileFailure> {
     let source = match std::fs::read_to_string(src) {
         Ok(s) => s,
@@ -95,6 +152,46 @@ pub fn cmd_build(
     };
     let hir_hash = pebble_semantics::hir_hash(&hir);
 
+    // 3.5 ch13 静态预算：从 lock 的 max_rows 承诺推导最坏情况输出行数。
+    //     有配额但预算不可用（源缺 max_rows）→ 同样拒绝：宁可不放行，不静默降级。
+    let max_rows_of = |kind: &pebble_hir::SourceKind| -> Option<u64> {
+        let identity = match kind {
+            pebble_hir::SourceKind::Table { locator, .. } => format!("table:{}", locator),
+            pebble_hir::SourceKind::MemoryTable { name, .. } => format!("memory:{}", name),
+        };
+        catalog.get(&identity).and_then(|l| l.max_rows)
+    };
+    let budget = budget::estimate(&hir, &max_rows_of, quota_rows);
+    let estimated = budget.bound.map(|b| b.min(u64::MAX as u128) as u64);
+    if quota_rows.is_some() {
+        match budget.bound {
+            None => {
+                return Err(CompileFailure::diagnostics(
+                    &source,
+                    &filename,
+                    &budget_unavailable_diag(&program, &catalog, &hir),
+                ));
+            }
+            Some(b) if b > quota_rows.unwrap_or(0) as u128 => {
+                let mut diags2 = pebble_diagnostic::DiagBag::new();
+                let span = budget
+                    .culprit
+                    .unwrap_or_else(|| program.pipeline.source.span());
+                diags2.error(
+                    pebble_diagnostic::Code::SemBudgetExceeded,
+                    format!(
+                        "静态预算超限：最坏情况输出约 {} 行 > 配额 {} 行",
+                        b.min(9_999_999_999_999_999),
+                        quota_rows.unwrap_or(0)
+                    ),
+                    span,
+                );
+                return Err(CompileFailure::diagnostics(&source, &filename, &diags2));
+            }
+            _ => {}
+        }
+    }
+
     // 4. codegen
     let lock_of = |kind: &pebble_hir::SourceKind| -> Option<SchemaLock> {
         let identity = match kind {
@@ -103,7 +200,7 @@ pub fn cmd_build(
         };
         catalog.get(&identity).cloned()
     };
-    let artifact = match pebble_duckdb::compile_sql(&hir, &lock_of) {
+    let artifact = match pebble_duckdb::compile_sql(&hir, &lock_of, 512) {
         Ok(a) => a,
         Err(e) => {
             return Err(CompileFailure::env(
@@ -173,11 +270,17 @@ pub fn cmd_build(
         compiler_version: COMPILER_VERSION.to_string(),
         backend: artifact.backend_identity(),
         artifact_hash: format!("sha256:{}", artifact_hash),
-        engine_config: CanonicalConfig { threads: 1 },
+        engine_config: CanonicalConfig {
+            threads: 1,
+            memory_limit_mb: 512,
+        },
         terminal_options,
         engine_version_requirement: pin_duckdb.unwrap_or_default(),
         // M2（ch12）：build 只产未签名 manifest；签名是审批者的事（pebble sign）
         signature: String::new(),
+        // ch13（M3）：预算与配额进入 manifest——审批者在签名前就能看到最坏情况
+        estimated_max_output_rows: estimated,
+        quota_rows,
     };
     let manifest_hash = manifest.compute_hash();
 
@@ -240,8 +343,15 @@ pub struct RunOutcome {
     pub output_summary: Option<String>,
 }
 
-/// `pebble run <build_dir> [--duckdb <path>]`
-pub fn cmd_run(build_dir: &Path, duckdb: Option<&Path>) -> Result<RunOutcome, String> {
+/// `pebble run <build_dir> [--duckdb <path>] [--timeout-secs N]`
+///
+/// ch13（M3）：timeout_secs 到期即终止引擎进程 → RUN-004（宁可取消，不可失控）。
+/// OOM（DuckDB 触发 memory_limit）同样归类 RUN-004。
+pub fn cmd_run(
+    build_dir: &Path,
+    duckdb: Option<&Path>,
+    timeout_secs: Option<u64>,
+) -> Result<RunOutcome, String> {
     let manifest: ExecutionManifest = load_json(&build_dir.join("manifest.json"))?;
     // M2：未签名 manifest 照常执行（一致性证据链完整），但显式降级声明
     if manifest.signature.is_empty() {
@@ -382,16 +492,30 @@ pub fn cmd_run(build_dir: &Path, duckdb: Option<&Path>) -> Result<RunOutcome, St
         return write_receipt(build_dir, r, false, None);
     }
 
-    // 6. 提交工件执行
-    let (status, output) = match run_duckdb_capture_status(&duckdb_path, &plan_sql) {
+    // 6. 提交工件执行（ch13：超时 → RUN-004；OOM → RUN-004）
+    let timeout = timeout_secs.map(std::time::Duration::from_secs);
+    let (status, output) = match run_duckdb_capture_status(&duckdb_path, &plan_sql, timeout) {
         RunResult::Ok(stdout) => (ExecutionStatus::Ok, Some(stdout)),
-        RunResult::Err(stderr) => (
+        RunResult::TimedOut => (
             ExecutionStatus::Failed {
-                code: RunCode::IoFailure,
-                message: stderr,
+                code: RunCode::ResourceExhausted,
+                message: format!(
+                    "执行超时（{} 秒），引擎进程已被终止——宁可取消，不可失控",
+                    timeout_secs.unwrap_or(0)
+                ),
             },
             None,
         ),
+        RunResult::Err(stderr) => {
+            let code = classify_engine_failure(&stderr);
+            (
+                ExecutionStatus::Failed {
+                    code,
+                    message: stderr,
+                },
+                None,
+            )
+        }
     };
 
     // 7. 输出摘要
@@ -444,16 +568,34 @@ pub fn cmd_run(build_dir: &Path, duckdb: Option<&Path>) -> Result<RunOutcome, St
 enum RunResult {
     Ok(String),
     Err(String),
+    /// ch13：超时被杀。与 Err 分开——receipt 归类 RUN-004 而非 RUN-003。
+    TimedOut,
 }
 
 fn run_duckdb_capture(duckdb: &Path, script: &str) -> Option<String> {
-    match run_duckdb_capture_status(duckdb, script) {
+    match run_duckdb_capture_status(duckdb, script, None) {
         RunResult::Ok(s) => Some(s),
-        RunResult::Err(_) => None,
+        _ => None,
     }
 }
 
-fn run_duckdb_capture_status(duckdb: &Path, script: &str) -> RunResult {
+/// ch13：引擎失败归类。DuckDB 触发 memory_limit 的报错含 "Out of Memory"/
+/// "memory limit"，归 RUN-004（资源）；其余（语法外的引擎错误、文件问题）归 RUN-003。
+/// 公开导出供集成测试直接断言分类规则。
+pub fn classify_engine_failure(stderr: &str) -> RunCode {
+    let lower = stderr.to_ascii_lowercase();
+    if lower.contains("out of memory") || lower.contains("memory limit") || lower.contains("oom") {
+        RunCode::ResourceExhausted
+    } else {
+        RunCode::IoFailure
+    }
+}
+
+fn run_duckdb_capture_status(
+    duckdb: &Path,
+    script: &str,
+    timeout: Option<std::time::Duration>,
+) -> RunResult {
     use std::io::Write as _;
     let mut child = match Command::new(duckdb)
         .arg("-batch")
@@ -467,25 +609,54 @@ fn run_duckdb_capture_status(duckdb: &Path, script: &str) -> RunResult {
         Ok(c) => c,
         Err(e) => return RunResult::Err(format!("启动 duckdb 失败: {}", e)),
     };
-    if let Some(stdin) = child.stdin.as_mut() {
+    // 写完脚本立即关闭 stdin：EOF 是「脚本完了」的信号；一直握着它引擎会等输入
+    {
+        let Some(mut stdin) = child.stdin.take() else {
+            return RunResult::Err("duckdb stdin 不可用".into());
+        };
         if stdin.write_all(script.as_bytes()).is_err() {
             return RunResult::Err("写入 duckdb stdin 失败".into());
         }
     }
-    match child.wait_with_output() {
-        Ok(out) => {
-            if out.status.success() {
-                RunResult::Ok(String::from_utf8_lossy(&out.stdout).to_string())
-            } else {
-                let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
-                RunResult::Err(if stderr.is_empty() {
-                    format!("duckdb 退出码 {}", out.status.code().unwrap_or(-1))
-                } else {
-                    stderr
-                })
+    // ch13：带超时的等待。std 没有带超时的 wait——轮询 try_wait，
+    // 到期 kill：宁可取消，不可失控（超时杀掉的进程没有有意义的 stdout/stderr）。
+    let deadline = timeout.map(|t| std::time::Instant::now() + t);
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(st)) => break Some(st),
+            Ok(None) => {
+                if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+                    let _ = child.kill();
+                    break None;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
             }
+            Err(e) => return RunResult::Err(format!("等待 duckdb 失败: {}", e)),
         }
-        Err(e) => RunResult::Err(format!("等待 duckdb 失败: {}", e)),
+    };
+    let Some(status) = status else {
+        return RunResult::TimedOut;
+    };
+    // 进程已退出：排空管道再取状态（先 stdout 后 stderr，避免反序竞态丢字节）
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    if let Some(mut pipe) = child.stdout.take() {
+        use std::io::Read as _;
+        let _ = pipe.read_to_end(&mut stdout);
+    }
+    if let Some(mut pipe) = child.stderr.take() {
+        use std::io::Read as _;
+        let _ = pipe.read_to_end(&mut stderr);
+    }
+    if status.success() {
+        RunResult::Ok(String::from_utf8_lossy(&stdout).to_string())
+    } else {
+        let err_text = String::from_utf8_lossy(&stderr).trim().to_string();
+        RunResult::Err(if err_text.is_empty() {
+            format!("duckdb 退出码 {}", status.code().unwrap_or(-1))
+        } else {
+            err_text
+        })
     }
 }
 
@@ -665,16 +836,37 @@ pub fn cmd_sign(manifest_path: &Path, key_path: &Path) -> Result<(String, String
 // ---------- lock ----------
 
 /// `pebble lock table <locator> <field>...` / `pebble lock memory <name> [--data-file f] <field>...`
-/// 字段格式：`name:type` 或 `name:type?`（可选）。
+/// 字段格式：`name:type` 或 `name:type?`（可选）。ch13：`--max-rows N` 声明行数上界
+/// （宿主对数据规模的**承诺**，进 lock 主体哈希，参与静态预算）。
 pub fn cmd_lock(args: &[String], out: &Path) -> Result<(), String> {
     if args.len() < 2 {
         return Err(
-            "用法: pebble lock <table|memory> <locator|name> [--data-file f] name:type[?]..."
+            "用法: pebble lock <table|memory> <locator|name> [--data-file f] [--max-rows N] name:type[?]..."
                 .into(),
         );
     }
     let kind = args[0].as_str();
     let rest = &args[1..];
+    // 通用旗标解析：--max-rows 对 table/memory 都合法
+    let mut max_rows: Option<u64> = None;
+    let mut filtered: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < rest.len() {
+        if rest[i] == "--max-rows" {
+            let Some(v) = rest.get(i + 1) else {
+                return Err("--max-rows 需要一个数值参数".into());
+            };
+            max_rows = Some(
+                v.parse::<u64>()
+                    .map_err(|_| format!("--max-rows 不是数字：{v}"))?,
+            );
+            i += 2;
+        } else {
+            filtered.push(rest[i].clone());
+            i += 1;
+        }
+    }
+    let rest = &filtered;
     let (source, mut field_args) = match kind {
         "table" => {
             let locator = rest[0].clone();
@@ -722,7 +914,7 @@ pub fn cmd_lock(args: &[String], out: &Path) -> Result<(), String> {
             optional,
         });
     }
-    let lock = SchemaLock::build(source, fields);
+    let lock = SchemaLock::build_with_max_rows(source, fields, max_rows);
     std::fs::write(out, lock.to_json()).map_err(|e| format!("写出 lock 失败: {}", e))?;
     Ok(())
 }
