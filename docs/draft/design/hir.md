@@ -1,10 +1,10 @@
 # HIR 设计草案
 
-> 对应 crate：`pebble-hir`。HIR 是前端语义层与所有后端之间的**唯一 typed Logical 边界**：DuckDB SQL、后续 Polars、LaTeX 及未来原生受控执行器统一从 HIR 输入，禁止 AST 直连后端。M0/M1 只有 DuckDB SQL 产品实现，但接口不得把 DuckDB SQL 或外部引擎的 Physical Plan 塞回 HIR。
+> 对应 crate：`pebble-hir`。HIR 是前端语义层与所有后端之间的**唯一 typed Logical 边界**：DuckDB SQL、LaTeX 及未来 MLIR 原生受控执行器统一从 HIR 输入，禁止 AST 直连后端。M0/M1 只有 DuckDB SQL 产品实现，但接口不得把 DuckDB SQL 或外部引擎的 Physical Plan 塞回 HIR。
 
 ## 1. 设计目标
 
-- **后端无关**：不包含 SQL 方言、Polars 表达式、CLIF/MLIR、调用约定或内存布局。
+- **后端无关**：不包含 SQL 方言、引擎私有的表达式形态、CLIF/MLIR、调用约定或内存布局。
 - **Schema 附着**：每个节点携带输出 Schema；可空性只由 `Type::Opt` 表达。
 - **稳定字段身份**：字段引用不依赖裸名字或源别名，join 重名、投影和覆盖后仍能区分来源。
 - **DAG 结构**：节点与输入边表达数据依赖；`sort/take` 显式保留顺序约束。
@@ -287,7 +287,7 @@ pub struct CompiledUnit {
 
 pub enum BackendArtifact {
     DuckDbSql { canonical_sql: String },
-    // 后续新增 Polars 等变体；M0/M1 不实现。
+    // 后续新增 Native(MLIR) 等变体；M0/M1 不实现。
 }
 
 pub struct ExecutionManifest {
@@ -326,11 +326,11 @@ canonical HIR
   vs. 本次实际提交工件与执行 receipt
 ```
 
-MVP 保证的是证据链完整性和执行请求一致性。DuckDB/Polars 可自行重写逻辑与物理计划，属于指定版本后端的信任基；不得宣称已审 HIR 等于实际物理计划。
+MVP 保证的是证据链完整性和执行请求一致性。DuckDB 可自行重写逻辑与物理计划，属于指定版本后端的信任基；不得宣称已审 HIR 等于实际物理计划。
 
 ### 12.2 多后端与原生路线
 
 - **M0/M1**：只实现 `BackendArtifact::DuckDbSql`，接口保持后端中立；不建设双后端一致性框架。
-- **后续**：Polars 作为独立 BackendArtifact/codegen，必须显式声明语义差集和能力检查，不能默认与 DuckDB 等价。
+- **后续（M4）**：MLIR 原生 BackendArtifact 必须显式声明语义差集和能力检查，并与 DuckDB 后端做跨后端对拍。
 - **M4 研究/原生受控执行后端**：Cranelift/MLIR 保留在路线图中；只有该路线才引入 Pebble 自有 Physical Plan、列式内核与必要 storage。届时路径为 `HIR → Pebble Physical Plan → native BackendArtifact`，Physical Plan 不反向污染 Logical HIR。
 - **M0/M1 不做**：自建 Physical Plan、Arrow 全栈或自研 parquet/storage。Arrow 仅在后续宿主交换确有需要时引入。

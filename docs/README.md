@@ -2,7 +2,7 @@
 
 > 当前权威入口是 [`design-decisions.md`](design-decisions.md) v3。
 > **项目第一目标**：完整体验一门语言从立项、实现到落地；因此本仓库采用**教程驱动开发**——实现改动必须与 `tutorial/` 同步演进。
-> 后端路线：DuckDB（M0 已实现）→ Polars（M3）→ Cranelift/MLIR 原生后端（M4）。
+> 后端路线：DuckDB（M0 已实现）→ MLIR 原生后端（M4 主路线）；Polars 已取消（2026-11-28 修订）。
 
 ## 从 0 到 1 系列教程（教程驱动，一章一状态）
 

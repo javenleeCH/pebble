@@ -32,7 +32,7 @@
 |---|---|
 | 最高目标 | 可核对证据链与唯一语义 > 可审计 > 受控嵌入 > 性能 |
 | 类型模型 | 静态强类型 + 推导 + `?T` + 可靠但不完备的流敏非空收缩 |
-| 执行方式 | canonical Logical HIR → 多后端 BackendArtifact；DuckDB 首发，Polars 后续，Cranelift/MLIR 原生后端列入 M4 路线 |
+| 执行方式 | canonical Logical HIR → 多后端 BackendArtifact；DuckDB 首发，MLIR 原生后端列入 M4 主路线（Polars 后端已取消，2026-11-28）|
 | 审计模型 | Schema lock + Execution Manifest + Receipt；指定 DuckDB 与编译器在 TCB 内 |
 | 编程范式 | 纯数据流、受控输入输出能力、无任意 UDF |
 | 错误模型 | 用户表达式定义域失败返回类型化 null；IO/OOM/取消等作为执行状态报告 |
@@ -41,7 +41,7 @@
 
 MemoryTable、filter、extend、group_by+agg/全局 agg、select+as、sort+take、collect、5 个聚合函数、少量严格字符串函数、完整 P0 语义、canonical HIR/hash、Schema lock、DuckDB codegen、manifest/receipt/verify。
 
-原则：**砍功能，不砍保留功能的语义。** cast、时间、coalesce、split、完整沙箱后置；多后端按 DuckDB → Polars 分阶段接入，Cranelift/MLIR 原生后端保留在 M4 路线图。
+原则：**砍功能，不砍保留功能的语义。** cast、时间、coalesce、split、完整沙箱后置；多后端按 DuckDB → MLIR 推进（Polars 已取消，Cranelift 为研究对照）。
 
 ## 5. 五条红线
 

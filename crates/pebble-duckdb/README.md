@@ -19,4 +19,4 @@ SQL 形态（artifact v2，第 10 章）：连续的行级算子并进同一层 
 
 已知语义差集（未修）：`lower` / `upper` 在三处特殊码点上是 Unicode 简单映射，而规范要求全映射。
 
-后续多后端路线：Polars 在 M3 作为独立 BackendArtifact 接入；Cranelift/MLIR 在 M4 走 Pebble Physical Plan 与 native BackendArtifact，不经过本 crate。
+后续多后端路线：MLIR 在 M4 走 Pebble Physical Plan 与 native BackendArtifact，不经过本 crate（Polars 后端已取消，2026-11-28）。

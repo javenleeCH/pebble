@@ -64,9 +64,9 @@ cargo run -p pebble-driver -- verify examples/target/pebble/00_m0_revenue/manife
 
 Rust 2024 · 手写递归下降解析（原型实现选择；Chumsky 为路线草案）· 自定义源码级诊断渲染（Ariadne 为路线草案）· canonical typed HIR · Schema lock · **可插拔多后端 BackendArtifact** · Execution Manifest / Receipt / Verify · 最小 LaTeX 可读视图。
 
-后端路线：**DuckDB SQL（M0 已实现）→ Polars（M3）→ Cranelift / MLIR（M4 原生执行后端，保留并持续推进研究原型）**。
+后端路线：**DuckDB SQL（M0 已实现）→ MLIR 原生执行后端（M4 主路线）**；Cranelift 保留为研究对照（非产品路线）。路线修订（2026-11-28）：Polars 后端取消——原生后端直上 MLIR。
 
-M0 明确不做：Polars/多后端、另写解释器、自建 Physical Plan、Arrow 全栈、自研 storage；时间函数/coalesce/split、数值转字符串与通用 `cast` 仍后置（`having` 与受限 `cast` 已在 v0.1.1 完成）。
+M0 明确不做：另写解释器、自建 Physical Plan、Arrow 全栈、自研 storage；时间函数/coalesce/split、数值转字符串与通用 `cast` 仍后置（`having` 与受限 `cast` 已在 v0.1.1 完成）。
 
 工件版本：DuckDB 后端的 SQL 形态为 v2（第 10 章）。v1 给每个算子套一层子查询，实测连续约 300 个算子以上 DuckDB 就无法执行；v2 把连续的行级算子并进同一层 `SELECT`，这个限制已消除。
 

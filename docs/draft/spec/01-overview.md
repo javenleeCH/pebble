@@ -99,7 +99,7 @@ Table("users.parquet") as u
 统一边界是 canonical typed Logical HIR，每个后端生成独立、可审计的 BackendArtifact：
 
 1. **M0/M1：DuckDB SQL 首发**，闭环 Schema lock、Manifest、Receipt、Verify。
-2. **M3：Polars 第二后端**，建立跨后端语义差集与一致性测试。
+2. ~~**M3：Polars 第二后端**~~（已取消，2026-11-28）：语义差集与一致性测试由「DuckDB vs 差分参考实现」承担，MLIR 后端落地后扩展对拍。
 3. **M4：Cranelift/MLIR 原生后端**，引入 Pebble Physical Plan；Cranelift 负责低延迟表达式/算子 JIT，MLIR 探索跨算子融合、向量化与多目标 lowering。
 
-外部引擎后端把指定版本 DuckDB/Polars 纳入信任基；不得宣称已审 HIR 等同于外部引擎实际物理计划。
+外部引擎后端把指定版本 DuckDB 纳入信任基；不得宣称已审 HIR 等同于外部引擎实际物理计划。MLIR 原生后端则相反：物理计划由 Pebble 生成，可绑定哈希——届时该限制按新信任边界改写。

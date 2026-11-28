@@ -105,16 +105,16 @@ MemoryTable("orders") as o
 **延期**
 
 - v0.1.1：~~`having`、少量有明确转换矩阵的 `cast`~~（已完成，教程第 11 章）、更多字符串函数、join/distinct/write/print 硬化、完整 Schema 版本仓库。
-- v0.2：Polars 作为第二个外部执行后端，并建立跨后端语义差集与一致性测试矩阵。
-- 更晚：通用 `cast`、全部时间函数、`coalesce/nullif/ifnull`、`substr`、`split`（必须与数组一起）、LaTeX 往返、完整资源配额/沙箱。Cranelift/MLIR 原生后端按 §3.3、§6.4 路线持续推进。
+- 更晚：通用 `cast`、全部时间函数、`coalesce/nullif/ifnull`、`substr`、`split`（必须与数组一起）、LaTeX 往返、完整资源配额/沙箱。MLIR 原生后端按 §3.3、§6.4 路线持续推进。
+- **路线修订（2026-11-28）**：Polars 第二外部后端**取消**——原生后端直上 MLIR；跨后端语义差集测试矩阵改由「DuckDB 后端 vs 差分参考实现」承担，并在 MLIR 后端落地时扩展为「DuckDB vs MLIR」对拍。
 
 原则：**砍功能，不砍保留功能的语义。**
 
 ### 3.3 后续里程碑
 
-- **M2**：保真审计物与证据工件签名/独立 verifier；LaTeX 往返仅在语义覆盖完整后开展。
-- **M3**：宿主 SDK、取消/配额/输出限制、恶意查询测试；Arrow 仅作为必要的宿主交换格式引入。**接入 Polars 第二后端**，用同一 canonical HIR 生成独立 BackendArtifact，并公开语义差集与一致性验证结果。
-- **M4：原生执行后端路线（保留并推进 Cranelift/MLIR）**：先完成表达式 JIT 与受控执行原型，再按真实负载和可信性需求决定是否建设完整原生执行器；此时引入 Pebble Physical Plan、列式内核与 storage。**Cranelift 负责低延迟表达式/算子 JIT，MLIR 负责跨算子融合、向量化和多目标 lowering 探索**，两者都属于正式路线图，不再作为 MVP 的性能承诺。
+- **M2**：证据工件签名（ed25519）与独立 verifier；canonical HIR 反序列化 roundtrip；LaTeX 往返仅在语义覆盖完整后开展。
+- **M3**：宿主 SDK、取消/配额/输出限制、恶意查询测试；Arrow 仅作为必要的宿主交换格式引入。
+- **M4：MLIR 原生执行后端（主路线）**：`HIR → Pebble Physical Plan → native BackendArtifact`（工件哈希对象为 canonical 物理计划文本，非机器码）；先完成表达式 JIT 与受控执行原型，再按真实负载和可信性需求决定是否建设完整原生执行器；届时引入列式内核与 storage。**Cranelift 降为研究对照**（非产品路线），保留 crate 供基准对比。
 - **M5**：2–3 个设计伙伴共创，以证据链或安全嵌入的单一必杀指标验收。
 
 ---
@@ -220,10 +220,10 @@ Pebble source
 分阶段扩展：
 
 1. **M0/M1：DuckDB SQL 首发后端**，先闭环证据链与语义一致性，不另写解释器。
-2. **M3：Polars 外部执行后端**，复用 HIR，但单独版本化 BackendArtifact、manifest 与语义一致性测试。
-3. **M4：Cranelift / MLIR 原生后端**，引入 Pebble Physical Plan；原生后端可直接控制物理执行，因此审计边界与外部引擎后端分别定义。
+2. **M4：MLIR 原生后端（主路线）**，引入 Pebble Physical Plan；`artifact_hash` 对 canonical 物理计划文本（MLIR 的输入）计算，不对机器码（Cranelift/MLIR 输出非 bit 稳定）。原生后端可直接控制物理执行，因此审计边界与外部引擎后端分别定义。
+3. **Cranelift：研究对照**（2026-11-28 降级），保留 crate 用于 JIT 基准对比，非产品路线。
 
-M0/M1 不做：多后端同时首发、另写解释器、Arrow 全栈、自研 parquet/storage。外部引擎观测到的 EXPLAIN 只能作为 receipt 附件，不冒充 Pebble 决策层。Cranelift/MLIR 在 M4 前保留可独立构建的研究原型与基准测试，不阻塞首发后端。
+M0/M1 不做：多后端同时首发、另写解释器、Arrow 全栈、自研 parquet/storage。外部引擎观测到的 EXPLAIN 只能作为 receipt 附件，不冒充 Pebble 决策层。MLIR 原型在 M4 前可独立构建与跑基准，不阻塞首发后端。
 
 ### 6.2 Schema lock 工作流
 
@@ -288,4 +288,4 @@ v0.1.1（2026-11-27，教程第 11 章）：`having` 是语法糖，lowering 成
 同批修复（都是「对的程序编译不过」或「语义差集」）：常量表达式里的内置函数调用被误报为 SEM-016；混合类型的常量除零（`1.5 / 0`）未被诊断；`trim` 沿用 DuckDB 默认行为、不去制表符。
 已知语义差集（未修）：`lower` / `upper` 的三处结果与规范的 Unicode 全映射不一致（DuckDB 实现为简单映射）。消除差集需要在 SQL 里为一百余个特殊码点写守卫，或把规范改为简单映射——属于语言设计决定，待定。
 
-下一步（按序）：威胁模型与恶意查询测试集 → 更多语义边界测试（Kleene 反例矩阵、除零/溢出动态用例）→ v0.1.1 剩余项（字符串函数、join/distinct/write/print 硬化、Schema 版本仓库）与 `lower`/`upper` 差集的决定 → M2 证据签名与 verifier 独立化 → M3 Polars 第二后端 → M4 Cranelift/MLIR 原生后端路线推进。
+下一步（按序，2026-11-28 修订）：**M2 证据签名与独立 verifier（第 12 章，进行中）** → 威胁模型与恶意查询测试集、Kleene 反例矩阵等语义边界测试 → v0.1.1 剩余项（字符串函数、join/distinct/write/print 硬化、Schema 版本仓库）与 `lower`/`upper` 差集的决定 → M3 宿主 SDK 与资源配额 → M4 MLIR 原生后端（主路线；Cranelift 研究对照）→ M5 设计伙伴。Polars 第二后端已取消。
